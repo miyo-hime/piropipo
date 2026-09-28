@@ -1,0 +1,9 @@
+[package]
+name = "piropipo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ffmml = "0.1.2"
+hound = "3.5.1"
+sfxr = "0.1.4"
