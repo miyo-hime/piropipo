@@ -1,6 +1,6 @@
 # the grid format, v0
 
-> status: draft. the parser doesn't exist yet; this doc is the contract we're building it against. the open questions at the bottom are genuinely open, not rhetorical.
+> status: v0, implemented. the parser and renderer are built against this doc and its example is their test fixture, so if the two ever disagree a test goes red. the open questions at the bottom are genuinely open, not rhetorical.
 
 ## why a grid and not MML
 
