@@ -72,6 +72,10 @@ the profile defines which lanes exist and what they can do. for `nes`: `pulse1`,
 
 every error names the lane, the bar, and the slot, in the same `bar.slot` syntax you write. the checker also prints each note's computed end position, so a seam like "does the bass stop exactly where the next note starts" is checkable by eye without doing the carry yourself.
 
+"end" always means **the last slot the note rings in**, inclusive. a note at `1.9` with `x16` rings through `2.8`, and the next note may start at `2.9`. a perfect seam is end + 1 = next start, never end = next start.
+
+two more facts the parser commits to, so they're spec now: notes within a lane may be written in any order (the checker sorts; position is truth, line order is convenience), and pattern names are unique per file (the future song order will reference them by name).
+
 ## open questions
 
 - **the `x` sigil.** `x2` reads as "play twice" to anyone with tracker habits. it might need to be a different character, or nothing at all.
