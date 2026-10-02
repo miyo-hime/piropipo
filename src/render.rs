@@ -1,3 +1,4 @@
+use crate::profile::{self, Breach, Part, Voice};
 use crate::score::{Note, Pattern, Position, Song};
 use std::fmt;
 
@@ -7,21 +8,10 @@ const VOLUME: u8 = 10;
 
 const SPELLING: [&str; 12] = ["c", "c+", "d", "d+", "e", "f", "f+", "g", "g+", "a", "a+", "b"];
 
-const SCIENTIFIC: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Voice { Pulse, Triangle, Noise }
-
-const NES: [(&str, char, Voice); 4] = [("pulse1", 'A', Voice::Pulse), ("pulse2", 'B', Voice::Pulse), ("triangle", 'C', Voice::Triangle), ("noise", 'D', Voice::Noise)];
-
 impl Voice {
-    fn takes(self) -> &'static [&'static str] { if self == Voice::Pulse { &["duty"] } else { &[] } }
-
     fn volume(self) -> u8 { if self == Voice::Triangle { 15 } else { VOLUME } }
 
-    fn playable(self) -> &'static str { if self == Voice::Triangle { "C1 through B6" } else { "C2 through B7" } }
-
-    fn spell(self, pitch: u8) -> Option<(i32, &'static str)> {
+    fn spell(self, pitch: u8) -> Option<(i32, String)> {
         let class = usize::from(pitch % 12);
         let octave = i32::from(pitch / 12) - 1;
         // ffmml's triangle sounds an octave below a pulse on the same `o`, like the 2A03's.
@@ -31,7 +21,13 @@ impl Voice {
             Voice::Triangle => (octave + 1, SPELLING[class]),
             Voice::Noise => (4, SPELLING[11 - class]),
         };
-        (2..=7).contains(&octave).then_some((octave, letter))
+        match octave {
+            2..=7 => Some((octave, letter.into())),
+            // `o` stops at 2 and 7, but ffmml pitches c through g+ off the A below them, so stacked flats on o2's c reach down to A, and stacked sharps on o7's b climb to the G# above
+            1 if class >= 9 => Some((2, format!("c{}", "-".repeat(12 - class)))),
+            8 if class <= 8 => Some((7, format!("b{}", "+".repeat(class + 1)))),
+            _ => None,
+        }
     }
 }
 
@@ -42,6 +38,7 @@ pub enum RenderError {
     Grid(u32),
     Lane(String),
     Param { lane: String, key: String, takes: &'static [&'static str] },
+    Volume { lane: String, key: String },
     Duty { lane: String, value: String },
     Range { lane: String, at: Position, pitch: u8, playable: &'static str },
     Misfit { lane: String, at: Position },
@@ -51,14 +48,14 @@ pub enum RenderError {
 impl fmt::Display for RenderError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            RenderError::Profile(profile) => write!(f, "profile `{profile}` has no renderer yet; only `nes` plays"),
+            RenderError::Profile(profile) => write!(f, "{}", Breach::Profile(profile.clone())),
             RenderError::Tempo(tempo) => write!(f, "tempo {tempo} is out of the renderer's reach; keep it between 1 and 255"),
             RenderError::Grid(grid) => write!(f, "grid {grid} is out of the renderer's reach; keep it between 1 and 255 slots per bar"),
-            RenderError::Lane(lane) => write!(f, "`{lane}` isn't an nes lane; the lanes are `pulse1`, `pulse2`, `triangle`, and `noise`"),
-            RenderError::Param { lane, key, takes: [] } => write!(f, "lane {lane}: doesn't take `{key}`; it takes no parameters"),
-            RenderError::Param { lane, key, takes } => write!(f, "lane {lane}: doesn't take `{key}`; it takes {}", takes.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(" and ")),
-            RenderError::Duty { lane, value } => write!(f, "lane {lane}: duty `{value}` isn't a pulse width the chip has; pick 12, 25, 50, or 75"),
-            RenderError::Range { lane, at, pitch, playable } => write!(f, "lane {lane}, at {at}: {} is out of range; this lane plays {playable}", named(*pitch)),
+            RenderError::Lane(lane) => write!(f, "{}", Breach::Lane(lane.clone())),
+            RenderError::Param { lane, key, takes } => write!(f, "lane {lane}: {}", Breach::Param { key: key.clone(), takes }),
+            RenderError::Volume { lane, key } => write!(f, "lane {lane}: {}", Breach::Volume(key.clone())),
+            RenderError::Duty { lane, value } => write!(f, "lane {lane}: {}", Breach::Duty(value.clone())),
+            RenderError::Range { lane, at, pitch, playable } => write!(f, "lane {lane}, at {at}: {}", Breach::Range { at: *at, pitch: *pitch, playable }),
             RenderError::Misfit { lane, at } => write!(f, "lane {lane}, at {at}: this note doesn't fit the pattern (an overlap, a zero length, or a spot outside it); the parser's checks would have refused it"),
             RenderError::Mml(why) => write!(f, "ffmml refused the compiled score, which is a renderer bug:\n{why}"),
         }
@@ -67,24 +64,37 @@ impl fmt::Display for RenderError {
 
 impl std::error::Error for RenderError {}
 
+fn charged(lane: &str, breach: Breach) -> RenderError {
+    let lane = lane.to_owned();
+    match breach {
+        Breach::Profile(name) => RenderError::Profile(name),
+        Breach::Lane(name) => RenderError::Lane(name),
+        Breach::Param { key, takes } => RenderError::Param { lane, key, takes },
+        Breach::Volume(key) => RenderError::Volume { lane, key },
+        Breach::Duty(value) => RenderError::Duty { lane, value },
+        Breach::Range { at, pitch, playable } => RenderError::Range { lane, at, pitch, playable },
+    }
+}
+
 pub fn pattern(song: &Song, pattern: &Pattern) -> Result<Vec<i16>, RenderError> { perform(&transcribe(song, pattern)?) }
 
 fn transcribe(song: &Song, pattern: &Pattern) -> Result<String, RenderError> {
-    if let Some(profile) = song.profile.as_deref().filter(|p| *p != "nes") { return Err(RenderError::Profile(profile.into())); }
+    let card = profile::card(song.profile.as_deref()).map_err(|breach| charged("", breach))?;
     if !(1..=255).contains(&song.tempo) { return Err(RenderError::Tempo(song.tempo)); }
     if !(1..=255).contains(&pattern.grid) { return Err(RenderError::Grid(pattern.grid)); }
-    if let Some(stray) = pattern.lanes.iter().find(|l| NES.iter().all(|(name, ..)| *name != l.name)) { return Err(RenderError::Lane(stray.name.clone())); }
-    let lines = NES.iter().map(|&voice| line(song.tempo, pattern, voice)).collect::<Result<Vec<_>, _>>()?;
+    if let Some(stray) = pattern.lanes.iter().find_map(|l| card.part(&l.name).err()) { return Err(charged("", stray)); }
+    let lines = card.parts.iter().map(|part| line(song.tempo, pattern, part)).collect::<Result<Vec<_>, _>>()?;
     Ok(lines.join("\n"))
 }
 
-fn line(tempo: u32, pattern: &Pattern, (name, channel, voice): (&str, char, Voice)) -> Result<String, RenderError> {
+fn line(tempo: u32, pattern: &Pattern, part: &Part) -> Result<String, RenderError> {
+    let Part { name, channel, voice, .. } = *part;
     let Pattern { bars, grid, .. } = *pattern;
     let span = u64::from(bars) * u64::from(grid);
     let lane = pattern.lanes.iter().find(|l| l.name == name);
     // a triangle that rests before its first note idles at full positive output in ffmml (a DC shelf), so every voice starts at v0 and finds its volume on its first note
     let mut words = vec![channel.to_string(), format!("t{tempo}"), "v0".to_owned()];
-    if let Some(timbre) = duty(name, voice, lane.map_or(&[][..], |l| l.params.as_slice()))? { words.push(format!("@{timbre}")); }
+    if let Some(timbre) = part.duty(lane.map_or(&[][..], |l| l.params.as_slice())).map_err(|breach| charged(name, breach))? { words.push(format!("@{timbre}")); }
     let mut notes: Vec<(&Note, u8)> = lane.iter().flat_map(|l| &l.notes).filter_map(|n| Some((n, n.pitch?))).collect();
     notes.sort_by_key(|(n, _)| n.at.tick(grid));
     let mut cursor = 0;
@@ -93,7 +103,8 @@ fn line(tempo: u32, pattern: &Pattern, (name, channel, voice): (&str, char, Voic
         let start = note.at.tick(grid);
         let end = start + u64::from(note.len);
         if bar == 0 || slot == 0 || slot > grid || note.len == 0 || start < cursor || end > span { return Err(RenderError::Misfit { lane: name.into(), at: note.at }); }
-        let (octave, letter) = voice.spell(pitch).ok_or_else(|| RenderError::Range { lane: name.into(), at: note.at, pitch, playable: voice.playable() })?;
+        part.plays(note).map_err(|breach| charged(name, breach))?;
+        let (octave, letter) = voice.spell(pitch).ok_or_else(|| charged(name, Breach::Range { at: note.at, pitch, playable: part.playable }))?;
         words.extend(lengths(grid, start - cursor).map(|d| format!("r{d}")));
         if i == 0 { words.push(format!("v{}", voice.volume())); }
         words.push(format!("o{octave}"));
@@ -103,21 +114,6 @@ fn line(tempo: u32, pattern: &Pattern, (name, channel, voice): (&str, char, Voic
     }
     words.extend(lengths(grid, span - cursor).map(|d| format!("r{d}")));
     Ok(words.join(" "))
-}
-
-fn duty(lane: &str, voice: Voice, params: &[(String, String)]) -> Result<Option<u8>, RenderError> {
-    let mut timbre = (voice == Voice::Pulse).then_some(2);
-    for (key, value) in params {
-        timbre = Some(match (voice, key.as_str(), value.as_str()) {
-            (Voice::Pulse, "duty", "12" | "12.5") => 0,
-            (Voice::Pulse, "duty", "25") => 1,
-            (Voice::Pulse, "duty", "50") => 2,
-            (Voice::Pulse, "duty", "75") => 3,
-            (Voice::Pulse, "duty", _) => return Err(RenderError::Duty { lane: lane.into(), value: value.clone() }),
-            _ => return Err(RenderError::Param { lane: lane.into(), key: key.clone(), takes: voice.takes() }),
-        });
-    }
-    Ok(timbre)
 }
 
 fn lengths(grid: u32, slots: u64) -> impl Iterator<Item = u32> {
@@ -140,11 +136,10 @@ fn perform(mml: &str) -> Result<Vec<i16>, RenderError> {
     }
 }
 
-fn named(pitch: u8) -> String { format!("{}{}", SCIENTIFIC[usize::from(pitch % 12)], i32::from(pitch / 12) - 1) }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::named;
 
     fn spec_example() -> &'static str {
         let doc = include_str!("../docs/format.md");
@@ -222,9 +217,11 @@ mod tests {
         }
     }
 
-    fn sounding(lane: &str, pitch: u8) -> f32 {
-        let song = song(&format!("song \"s\" tempo 120\npattern p bars 1 grid 4\nlane {lane}\n  1: {} x4\n", named(pitch)));
-        let channel = NES.iter().find(|(name, ..)| *name == lane).unwrap().1;
+    fn sounding(lane: &str, pitch: u8) -> f32 { sounding_on("nes", lane, pitch) }
+
+    fn sounding_on(card: &str, lane: &str, pitch: u8) -> f32 {
+        let song = song(&format!("song \"s\" tempo 120 profile {card}\npattern p bars 1 grid 4\nlane {lane}\n  1: {} x4\n", named(pitch)));
+        let channel = profile::card(Some(card)).unwrap().part(lane).unwrap().channel;
         let music: ffmml::Music = transcribe(&song, &song.patterns[0]).unwrap().parse().unwrap();
         let mut player = music.play(SAMPLE_RATE);
         player.by_ref().take(64).for_each(drop);
@@ -260,6 +257,39 @@ mod tests {
         assert!(matches!(render("song \"s\" tempo 90\npattern p bars 1 grid 4\nlane pulse2\n  1: C8 x1\n"), Err(RenderError::Range { pitch: 108, .. })));
         assert!(matches!(render("song \"s\" tempo 90\npattern p bars 1 grid 4\nlane triangle\n  1: B0 x1\n"), Err(RenderError::Range { pitch: 23, .. })));
         assert!(matches!(render("song \"s\" tempo 90\npattern p bars 1 grid 4\nlane triangle\n  1: C7 x1\n"), Err(RenderError::Range { pitch: 96, .. })));
+    }
+
+    #[test]
+    fn nes_free_sounds_at_concert_pitch_out_to_the_engine_edges() {
+        for (lane, low, high) in [("pulse2", 33, 116), ("triangle", 21, 104)] {
+            for pitch in low..=high {
+                let heard = sounding_on("nes-free", lane, pitch);
+                let concert = 440.0 * 2f32.powf((f32::from(pitch) - 69.0) / 12.0);
+                assert!((heard / concert - 1.0).abs() < 1e-4, "nes-free {lane} {} sounds at {heard} Hz, wants {concert} Hz", named(pitch));
+            }
+        }
+        assert_eq!(sounding_on("nes-free", "noise", 60), sounding("noise", 60));
+    }
+
+    #[test]
+    fn nes_free_draws_its_line_where_the_engine_does() {
+        let free = |lane: &str, pitch: &str| song(&format!("song \"s\" tempo 90 profile nes-free\npattern p bars 1 grid 4\nlane {lane}\n  1: {pitch} x3\n"));
+        let low = free("pulse1", "A1");
+        assert_eq!(transcribe(&low, &low.patterns[0]).unwrap().lines().next(), Some("A t90 v0 @2 v10 o2 c---2&c---4 r4"));
+        let high = free("triangle", "G#7");
+        assert_eq!(transcribe(&high, &high.patterns[0]).unwrap().lines().nth(2), Some("C t90 v0 v15 o7 b+++++++++2&b+++++++++4 r4"));
+        assert_eq!(pattern(&high, &high.patterns[0]).unwrap().len(), samples_in(4, 90, 4));
+        let under = free("pulse1", "G#1");
+        assert_eq!(pattern(&under, &under.patterns[0]).unwrap_err().to_string(), "lane pulse1, at 1.1: G#1 is out of range; this lane plays A1 through G#8");
+        let over = free("triangle", "A7");
+        assert!(matches!(pattern(&over, &over.patterns[0]), Err(RenderError::Range { pitch: 105, playable: "A0 through G#7", .. })));
+    }
+
+    #[test]
+    fn the_triangle_refuses_a_volume_it_does_not_have() {
+        let refused = render("song \"s\" tempo 90\npattern p bars 1 grid 4\nlane triangle vol 8\n  1: C3 x1\n").unwrap_err();
+        assert_eq!(refused, RenderError::Volume { lane: "triangle".into(), key: "vol".into() });
+        assert_eq!(refused.to_string(), "lane triangle: doesn't take `vol`; the triangle has no volume, it's either on or off");
     }
 
     #[test]
