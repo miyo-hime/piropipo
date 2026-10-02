@@ -1,7 +1,6 @@
-use crate::surface::{emit, land_beside, read_source};
-use piropipo::score::{Fault, Lane, Pattern, ScoreError, Song};
+use crate::surface::{emit, land_beside, publish, read_source};
+use piropipo::score::{Lane, Pattern, ScoreError, Song};
 use serde_json::{Value, json};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(clap::Args)]
@@ -75,26 +74,9 @@ fn blot(code: &str, message: String) -> Blot {
 }
 
 fn misprint(e: &ScoreError) -> Blot {
-    Blot { json: json!({ "code": code_of(&e.fault), "message": e.fault.to_string(), "pattern": e.pattern, "lane": e.lane, "at": e.at.map(|at| at.to_string()), "line": e.line }), human: e.to_string() }
+    Blot { json: json!({ "code": e.fault.code(), "message": e.fault.to_string(), "pattern": e.pattern, "lane": e.lane, "at": e.at.map(|at| at.to_string()), "line": e.line }), human: e.to_string() }
 }
 
-// ※ codes ride the variant's Debug name; a Fault::code() in score.rs is the way up once track and check want the same list
-fn code_of(fault: &Fault) -> String {
-    let mut code = String::new();
-    for c in format!("{fault:?}").chars().take_while(char::is_ascii_alphanumeric) {
-        if c.is_ascii_uppercase() && !code.is_empty() { code.push('-'); }
-        code.push(c.to_ascii_lowercase());
-    }
-    code
-}
-
-fn publish(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let name = target.file_name().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "the output path names no file"))?;
-    let draft = target.with_file_name(format!(".{}.{}.tmp", name.to_string_lossy(), std::process::id()));
-    let inked = std::fs::File::create(&draft).and_then(|mut file| { file.write_all(bytes)?; file.sync_all() }).and_then(|()| std::fs::rename(&draft, target));
-    if inked.is_err() { let _ = std::fs::remove_file(&draft); }
-    inked
-}
 
 struct Band<'s> { lane: &'s Lane, hue: Rgb, pitches: Option<(u8, u8)>, reach: usize, captions: Vec<String>, height: usize }
 
@@ -314,6 +296,7 @@ static GLYPHS: [(char, [&str; GLYPH_H]); 95] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+    use piropipo::score::Fault;
 
     fn spec_example() -> &'static str {
         let doc = include_str!("../docs/format.md");
@@ -366,10 +349,10 @@ mod tests {
     }
 
     #[test]
-    fn fault_codes_are_kebab_variant_names() {
-        assert_eq!(code_of(&Fault::SlotPastGrid { slot: 17, grid: 16, meant: None }), "slot-past-grid");
-        assert_eq!(code_of(&Fault::NoName("lane")), "no-name");
-        assert_eq!(code_of(&Fault::Silent), "silent");
+    fn fault_codes_come_from_the_one_list_in_score() {
+        assert_eq!(Fault::SlotPastGrid { slot: 17, grid: 16, meant: None }.code(), "slot-past-grid");
+        assert_eq!(Fault::NoName("lane").code(), "no-name");
+        assert_eq!(Fault::Silent.code(), "zero-length");
     }
 
     #[test]

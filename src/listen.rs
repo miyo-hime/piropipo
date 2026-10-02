@@ -1,6 +1,6 @@
 use crate::surface;
 use piropipo::render::{self, RenderError, SAMPLE_RATE};
-use piropipo::score::{Fault, Lane, Pattern, Position, ScoreError, Song};
+use piropipo::score::{Lane, Pattern, Position, ScoreError, Song};
 use serde_json::{Value, json};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -28,7 +28,7 @@ impl fmt::Display for Remark {
 }
 
 impl From<ScoreError> for Remark {
-    fn from(e: ScoreError) -> Self { Remark { code: code(&e.fault), message: e.fault.to_string(), pattern: e.pattern, lane: e.lane, at: e.at, line: e.line } }
+    fn from(e: ScoreError) -> Self { Remark { code: e.fault.code(), message: e.fault.to_string(), pattern: e.pattern, lane: e.lane, at: e.at, line: e.line } }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +146,7 @@ fn misheard(e: RenderError, pattern: &Pattern) -> Remark {
         RenderError::Grid(_) => ("grid-out-of-reach", None, None),
         RenderError::Lane(lane) => ("unknown-lane", Some(lane.clone()), None),
         RenderError::Param { lane, .. } => ("unknown-param", Some(lane.clone()), None),
+        RenderError::Volume { lane, .. } => ("no-volume-knob", Some(lane.clone()), None),
         RenderError::Duty { lane, .. } => ("bad-duty", Some(lane.clone()), None),
         RenderError::Range { lane, at, .. } => ("out-of-range", Some(lane.clone()), Some(*at)),
         RenderError::Misfit { lane, at } => ("misfit", Some(lane.clone()), Some(*at)),
@@ -159,40 +160,6 @@ fn misheard(e: RenderError, pattern: &Pattern) -> Remark {
     let prefix = match (&lane, at) { (Some(l), Some(a)) => format!("lane {l}, at {a}: "), (Some(l), None) => format!("lane {l}: "), _ => String::new() };
     let message = said.strip_prefix(&prefix).unwrap_or(&said).to_owned();
     Remark { code, message, pattern: (!song_wide).then(|| pattern.name.clone()), lane, at, line }
-}
-
-fn code(fault: &Fault) -> &'static str {
-    match fault {
-        Fault::Unreadable(_) => "unreadable-line",
-        Fault::NoSong => "no-song",
-        Fault::SecondSong { .. } => "second-song",
-        Fault::NoTitle => "no-title",
-        Fault::UnclosedTitle => "unclosed-title",
-        Fault::NoName(_) => "no-name",
-        Fault::MissingParam { .. } => "missing-param",
-        Fault::UnknownParam { .. } => "unknown-param",
-        Fault::RepeatedParam(_) => "repeated-param",
-        Fault::NoValue(_) => "no-value",
-        Fault::NotCount { .. } => "not-a-count",
-        Fault::SecondPattern { .. } => "second-pattern",
-        Fault::LaneOutsidePattern => "lane-outside-pattern",
-        Fault::NoteOutsideLane => "note-outside-lane",
-        Fault::SecondLane { .. } => "second-lane",
-        Fault::NoColon(_) => "no-colon",
-        Fault::BadPosition(_) => "bad-position",
-        Fault::NoPitch => "no-pitch",
-        Fault::BadPitch(_) => "bad-pitch",
-        Fault::NoLength => "no-length",
-        Fault::BadLength(_) => "bad-length",
-        Fault::Silent => "zero-length",
-        Fault::Leftover(_) => "leftover",
-        Fault::BarZero => "bar-zero",
-        Fault::SlotZero => "slot-zero",
-        Fault::BarPastEnd { .. } => "bar-past-end",
-        Fault::SlotPastGrid { .. } => "slot-past-grid",
-        Fault::RunsPastEnd { .. } => "runs-past-end",
-        Fault::Overlap { .. } => "overlap",
-    }
 }
 
 #[cfg(test)]

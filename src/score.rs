@@ -90,6 +90,42 @@ pub enum Fault {
     Overlap { with: Position, line: usize, through: Position },
 }
 
+impl Fault {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Fault::Unreadable(_) => "unreadable-line",
+            Fault::NoSong => "no-song",
+            Fault::SecondSong { .. } => "second-song",
+            Fault::NoTitle => "no-title",
+            Fault::UnclosedTitle => "unclosed-title",
+            Fault::NoName(_) => "no-name",
+            Fault::MissingParam { .. } => "missing-param",
+            Fault::UnknownParam { .. } => "unknown-param",
+            Fault::RepeatedParam(_) => "repeated-param",
+            Fault::NoValue(_) => "no-value",
+            Fault::NotCount { .. } => "not-a-count",
+            Fault::SecondPattern { .. } => "second-pattern",
+            Fault::LaneOutsidePattern => "lane-outside-pattern",
+            Fault::NoteOutsideLane => "note-outside-lane",
+            Fault::SecondLane { .. } => "second-lane",
+            Fault::NoColon(_) => "no-colon",
+            Fault::BadPosition(_) => "bad-position",
+            Fault::NoPitch => "no-pitch",
+            Fault::BadPitch(_) => "bad-pitch",
+            Fault::NoLength => "no-length",
+            Fault::BadLength(_) => "bad-length",
+            Fault::Silent => "zero-length",
+            Fault::Leftover(_) => "leftover",
+            Fault::BarZero => "bar-zero",
+            Fault::SlotZero => "slot-zero",
+            Fault::BarPastEnd { .. } => "bar-past-end",
+            Fault::SlotPastGrid { .. } => "slot-past-grid",
+            Fault::RunsPastEnd { .. } => "runs-past-end",
+            Fault::Overlap { .. } => "overlap",
+        }
+    }
+}
+
 impl fmt::Display for Fault {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let s = |n: u64| if n == 1 { "" } else { "s" };

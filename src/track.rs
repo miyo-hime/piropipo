@@ -1,7 +1,6 @@
 use crate::listen::{self, Remark, Take};
 use crate::surface;
 use piropipo::render::SAMPLE_RATE;
-use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(clap::Args)]
@@ -26,16 +25,7 @@ fn press(args: Args) -> Result<(Option<PathBuf>, Take), Vec<Remark>> {
 fn same_file(a: &Path, b: &Path) -> bool { std::fs::canonicalize(a).ok().is_some_and(|a| std::fs::canonicalize(b).ok() == Some(a)) }
 
 fn publish(dest: &Path, samples: &[i16]) -> std::io::Result<()> {
-    let spec = hound::WavSpec { channels: 1, sample_rate: u32::from(SAMPLE_RATE), bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
-    let mut wav = Cursor::new(Vec::new());
-    let mut pen = hound::WavWriter::new(&mut wav, spec).map_err(std::io::Error::other)?;
-    for s in samples { pen.write_sample(*s).map_err(std::io::Error::other)?; }
-    pen.finalize().map_err(std::io::Error::other)?;
-    let name = dest.file_name().ok_or_else(|| std::io::Error::other("the output path names a directory, not a file"))?;
-    let draft = dest.with_file_name(format!(".{}.{}.part", name.to_string_lossy(), std::process::id()));
-    let landed = std::fs::File::create(&draft).and_then(|mut f| { f.write_all(wav.get_ref())?; f.sync_all() }).and_then(|()| std::fs::rename(&draft, dest));
-    if landed.is_err() { let _ = std::fs::remove_file(&draft); }
-    landed
+    surface::publish(dest, &surface::pressed(samples, u32::from(SAMPLE_RATE)).map_err(std::io::Error::other)?)
 }
 
 #[cfg(test)]

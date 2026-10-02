@@ -1,8 +1,6 @@
 use crate::surface;
 use serde_json::{Value, json};
 use sfxr::{Generator, Sample, WaveType};
-use std::fs::{self, File};
-use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
 const RATE: u32 = 44_100;
@@ -253,27 +251,16 @@ fn ms(samples: f64) -> f64 { samples * 1000.0 / f64::from(RATE) }
 
 fn hundredths(x: f64) -> f64 { (x * 100.0).round() / 100.0 }
 
-fn pressed(samples: &[i16]) -> Result<Vec<u8>, hound::Error> {
-    let spec = hound::WavSpec { channels: 1, sample_rate: RATE, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
-    let mut disc = Cursor::new(Vec::new());
-    let mut wav = hound::WavWriter::new(&mut disc, spec)?;
-    for &s in samples { wav.write_sample(s)?; }
-    wav.finalize()?;
-    Ok(disc.into_inner())
-}
+fn pressed(samples: &[i16]) -> Result<Vec<u8>, hound::Error> { surface::pressed(samples, RATE) }
 
-fn publish(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let name = path.file_name().ok_or_else(|| std::io::Error::other("that path has no file name to land on"))?;
-    let draft = path.with_file_name(format!(".{}.{}.part", name.to_string_lossy(), std::process::id()));
-    let landed = File::create(&draft).and_then(|mut file| { file.write_all(bytes)?; file.sync_all() }).and_then(|()| fs::rename(&draft, path));
-    if landed.is_err() { let _ = fs::remove_file(&draft); }
-    landed
+fn publish(path: &Path, bytes: &[u8]) -> std::io::Result<()> { surface::publish(path, bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::fs;
 
     #[derive(Parser)]
     struct Probe {

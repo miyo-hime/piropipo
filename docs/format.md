@@ -62,7 +62,7 @@ you never have to write a rest; a gap in the slots is silence. but you *may* wri
 
 ## pitch
 
-scientific pitch notation, C4 is middle C. sharps with `#` (`C#4`), flats with `b` (`Db4`), same note. range limits come from the active profile, not the notation: the checker knows an NES pulse can't go below ~A1 and a triangle sits an octave lower, and says so per note.
+scientific pitch notation, C4 is middle C. sharps with `#` (`C#4`), flats with `b` (`Db4`), same note. range limits come from the active profile, not the notation: the checker knows an NES pulse plays C2 through B7 and a triangle C1 through B6, and says so per note.
 
 ## lanes
 
