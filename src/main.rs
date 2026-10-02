@@ -1,9 +1,10 @@
 use clap::Parser;
 
 mod check;
+mod listen;
 mod roll;
 mod sfx;
-#[allow(dead_code)] mod surface; // ※ nothing reaches it until the verbs are strung; wave 1 deletes this allow
+mod surface;
 mod track;
 
 #[derive(Parser)]
