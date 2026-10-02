@@ -27,7 +27,9 @@ the deaf-composer problem is handled in layers: `check` lints positions and chip
 
 `piro sfx` deserves its own sentence: presets like `coin`, `jump` and `explosion` work with zero knobs, the dials are real units (Hz, ms, semitones) instead of sfxr's 0-to-1 mystery floats, and the same command gives you the same bytes every run. the conversion table lives in [docs/sfx-mapping.md](docs/sfx-mapping.md).
 
-## building
+## getting it
+
+prebuilt binaries for linux (x86_64, arm64), macos (arm64) and windows are on the [releases page](https://github.com/miyo-hime/piropipo/releases) - download, unpack, done. or build it yourself:
 
 ```
 cargo build --release
