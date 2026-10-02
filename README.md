@@ -10,7 +10,7 @@ agents turn out to be decent little composers and terrible at classic music macr
 
 so the grid has one hard rule: a note's position is always written down, never derived. `2.9: A2 x16` means bar 2, slot 9, rings 16 slots. a wrong length stays a local mistake, and the checker can verify every line on its own. the full notation fits in [docs/format.md](docs/format.md), and honestly the example above is most of it.
 
-the other half of the trick is constraint profiles. the default `nes` card only lets through what the actual chip could play (two pulses, a triangle with no volume knob, a noise lane), which is the difference between sounding like an NES and sounding like a synth with a costume on.
+the other half of the trick is constraint profiles. the default `nes` card only lets through what the actual chip could play (two pulses, a triangle with no volume knob, a noise lane). that constraint is most of the chip sound - take it away and you just get square waves.
 
 ## the verbs
 
@@ -37,4 +37,4 @@ one binary, `piro`. rust because the alternative was python and i'd rather not.
 
 ## status
 
-young. the grid, the four verbs and the nes profile work and are tested; song structure (pattern order, repeats) and effects (vibrato, arpeggio, slides) are designed but not in yet. the format may still shift under you until those land.
+young. the grid, the four verbs and the nes profile work and are tested; song structure (pattern order, repeats) and effects (vibrato, arpeggio, slides) are designed but not in yet. the notation isn't frozen until those land, so expect some breaking changes.
