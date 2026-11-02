@@ -1,7 +1,7 @@
 use crate::surface;
 use piropipo::profile::{self, Breach, Charge};
-use piropipo::render::{self, RenderError, SAMPLE_RATE};
-use piropipo::score::{Cue, Lane, Pattern, Position, ScoreError, Song};
+use piropipo::render::{self, RenderError, SAMPLE_RATE, Stencils};
+use piropipo::score::{Bend, Cue, Lane, Note, Pattern, Position, ScoreError, Song};
 use serde_json::{Value, json};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -35,21 +35,53 @@ impl From<ScoreError> for Remark {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ring { pub at: Position, pub end: Position, pub rest: bool }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Solo { pub pattern: String, pub lane: String, pub line: usize, pub sounding: bool, pub notes: Vec<Ring> }
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Swing { pub shift: i8, pub ticks: u8, pub up: f64, pub down: f64 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Flourish {
+    Vibrato { at: Position, hertz: f64, delay_ms: f64, swings: Vec<Swing> },
+    Arpeggio { at: Position, steps: u64, rate: f64 },
+}
+
+impl Flourish {
+    fn json(&self) -> Value {
+        match self {
+            Flourish::Vibrato { at, hertz, delay_ms, swings } => {
+                let swings: Vec<Value> = swings.iter().map(|s| json!({ "transpose": s.shift, "ticks": s.ticks, "up_cents": round(s.up, 2), "down_cents": round(s.down, 2) })).collect();
+                json!({ "at": at.to_string(), "effect": "vib", "rate_hz": round(*hertz, 3), "delay_ms": round(*delay_ms, 1), "swings": swings })
+            }
+            Flourish::Arpeggio { at, steps, rate } => json!({ "at": at.to_string(), "effect": "arp", "steps": steps, "steps_per_second": round(*rate, 2) }),
+        }
+    }
+
+    fn tell(&self) -> String {
+        match self {
+            Flourish::Vibrato { at, hertz, delay_ms, swings } => {
+                let swings: Vec<String> = swings.iter().map(|s| format!("{}+{:.1}/-{:.1} cents ({} tick{})", if s.shift == 0 { String::new() } else { format!("played {:+}, ", s.shift) }, s.up, s.down, s.ticks, if s.ticks == 1 { "" } else { "s" })).collect();
+                format!("{at} vib: {} Hz after {delay_ms:.0} ms, swings {}", round(*hertz, 3), swings.join("; "))
+            }
+            Flourish::Arpeggio { at, steps, rate } => format!("{at} arp: {steps} steps, {rate:.1} a second"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Solo { pub pattern: String, pub lane: String, pub line: usize, pub sounding: bool, pub notes: Vec<Ring>, pub flourishes: Vec<Flourish> }
 
 impl Solo {
     fn voiced(&self) -> bool { self.notes.iter().any(|r| !r.rest) }
 
     fn json(&self) -> Value {
         let notes: Vec<Value> = self.notes.iter().map(|r| json!({ "at": r.at.to_string(), "end": r.end.to_string(), "rest": r.rest })).collect();
-        json!({ "pattern": self.pattern, "lane": self.lane, "sounding": self.sounding, "notes": notes })
+        json!({ "pattern": self.pattern, "lane": self.lane, "sounding": self.sounding, "notes": notes, "effects": self.flourishes.iter().map(Flourish::json).collect::<Vec<_>>() })
     }
 
     fn tell(&self) -> String {
         let state = match (self.sounding, self.voiced()) { (true, _) => "sounds", (false, true) => "renders silent", (false, false) => "carries no pitched notes" };
         let rings: Vec<String> = self.notes.iter().map(|r| format!("{}{} through {}", if r.rest { "rest " } else { "" }, r.at, r.end)).collect();
-        if rings.is_empty() { format!("pattern {}, lane {} {state}", self.pattern, self.lane) } else { format!("pattern {}, lane {} {state}: {}", self.pattern, self.lane, rings.join(", ")) }
+        let head = if rings.is_empty() { format!("pattern {}, lane {} {state}", self.pattern, self.lane) } else { format!("pattern {}, lane {} {state}: {}", self.pattern, self.lane, rings.join(", ")) };
+        std::iter::once(head).chain(self.flourishes.iter().map(|f| format!("  {}", f.tell()))).collect::<Vec<_>>().join("\n")
     }
 }
 
@@ -73,11 +105,15 @@ pub fn take(text: &str) -> Result<Take, Vec<Remark>> {
     if let Some(remark) = overlong(&song) { return Err(vec![remark]); }
     let mut samples = Vec::new();
     let mut lanes = Vec::new();
+    let mut stencils = Stencils::default();
     for (i, cue) in song.setlist.iter().enumerate() {
         let pattern = song.pattern(&cue.pattern).expect("the copyist refuses a play line that names no pattern");
-        samples.extend(render::transposed(&song, pattern, cue).and_then(|moved| render::pattern(&song, &moved)).map_err(|e| vec![misheard(e, pattern)])?);
+        samples.extend(render::transposed(&song, pattern, cue).and_then(|moved| render::pattern_with(&song, &moved, &mut stencils)).map_err(|e| vec![misheard(e, pattern)])?);
         if song.setlist.iter().take(i).any(|c| c.pattern == cue.pattern) { continue; }
-        for lane in &pattern.lanes { lanes.push(solo(&song, pattern, cue, lane)?); }
+        let mut shifts: Vec<i8> = song.setlist.iter().filter(|c| c.pattern == cue.pattern).map(|c| c.shift).collect();
+        shifts.sort_unstable();
+        shifts.dedup();
+        for lane in &pattern.lanes { lanes.push(solo(&song, pattern, cue, lane, &shifts)?); }
     }
     let haunted = ghosts(&song);
     if !haunted.is_empty() { return Err(haunted); }
@@ -123,7 +159,11 @@ fn overlong(song: &Song) -> Option<Remark> {
 fn ghosts(song: &Song) -> Vec<Remark> {
     let Ok(card) = profile::card(song.profile.as_deref()) else { return Vec::new() };
     let unplayed = song.patterns.iter().filter(|p| !song.setlist.iter().any(|c| c.pattern == p.name));
-    unplayed.flat_map(|p| card.audit(p).into_iter().map(|charge| indicted(p, &charge)).collect::<Vec<_>>()).collect()
+    unplayed.flat_map(|p| {
+        let charges: Vec<Remark> = card.audit(p).into_iter().map(|charge| indicted(p, &charge)).collect();
+        if !charges.is_empty() { return charges; }
+        render::vet(song, p).err().map(|e| misheard(e, p)).into_iter().collect()
+    }).collect()
 }
 
 fn indicted(pattern: &Pattern, charge: &Charge) -> Remark {
@@ -133,21 +173,45 @@ fn indicted(pattern: &Pattern, charge: &Charge) -> Remark {
         Breach::Param { .. } => ("unknown-param", None),
         Breach::Volume(_) => ("no-volume-knob", None),
         Breach::Duty(_) => ("bad-duty", None),
+        Breach::Loudness(_) => ("bad-volume", None),
         Breach::Range { at, .. } => ("out-of-range", Some(*at)),
+        Breach::Ornament { at, flaw } => (flaw.code(), Some(*at)),
     };
     let line = charge.note.map_or(charge.lane.line, |n| n.line);
     Remark { code, message: charge.breach.to_string(), pattern: Some(pattern.name.clone()), lane: Some(charge.lane.name.clone()), at, line: Some(line) }
 }
 
-fn solo(song: &Song, pattern: &Pattern, cue: &Cue, lane: &Lane) -> Result<Solo, Vec<Remark>> {
+fn solo(song: &Song, pattern: &Pattern, cue: &Cue, lane: &Lane, shifts: &[i8]) -> Result<Solo, Vec<Remark>> {
     let mut notes: Vec<Ring> = lane.notes.iter().map(|n| Ring { at: n.at, end: n.rings_through(pattern.grid), rest: n.pitch.is_none() }).collect();
     notes.sort_by_key(|r| r.at);
-    let mut heard = Solo { pattern: pattern.name.clone(), lane: lane.name.clone(), line: lane.line, sounding: false, notes };
+    let mut flourishes: Vec<Flourish> = lane.notes.iter().filter_map(|n| flourish(song.tempo, pattern.grid, n, shifts)).collect();
+    flourishes.sort_by_key(|f| match f { Flourish::Vibrato { at, .. } | Flourish::Arpeggio { at, .. } => *at });
+    let mut heard = Solo { pattern: pattern.name.clone(), lane: lane.name.clone(), line: lane.line, sounding: false, notes, flourishes };
     if heard.voiced() {
         let alone = Pattern { name: pattern.name.clone(), lanes: vec![lane.clone()], ..*pattern };
         heard.sounding = render::transposed(song, &alone, cue).and_then(|moved| render::pattern(song, &moved)).map_err(|e| vec![misheard(e, pattern)])?.iter().any(|s| *s != 0);
     }
     Ok(heard)
+}
+
+fn flourish(tempo: u32, grid: u32, note: &Note, shifts: &[i8]) -> Option<Flourish> {
+    let pitch = note.pitch?;
+    match note.ornaments.bend.as_ref()? {
+        Bend::Vibrato(vib) => {
+            let swings = shifts.iter().filter_map(|&shift| {
+                let played = u8::try_from(i16::from(pitch) + i16::from(shift)).ok()?;
+                let ticks = profile::ticks(played, vib.cents);
+                let (up, down) = profile::swing(played, ticks);
+                Some(Swing { shift, ticks: u8::try_from(ticks as u64).ok()?, up, down })
+            }).collect();
+            Some(Flourish::Vibrato { at: note.at, hertz: vib.hertz(), delay_ms: vib.delay_ms(), swings })
+        }
+        Bend::Arpeggio(_) => {
+            let (steps, rate) = render::arp_rate(tempo, grid, note.len);
+            Some(Flourish::Arpeggio { at: note.at, steps, rate })
+        }
+        Bend::Slide(_) => None,
+    }
 }
 
 fn hush(solo: &Solo) -> Option<Remark> {
@@ -172,8 +236,10 @@ fn misheard(e: RenderError, pattern: &Pattern) -> Remark {
         RenderError::Param { lane, .. } => ("unknown-param", Some(lane.clone()), None),
         RenderError::Volume { lane, .. } => ("no-volume-knob", Some(lane.clone()), None),
         RenderError::Duty { lane, .. } => ("bad-duty", Some(lane.clone()), None),
+        RenderError::Loudness { lane, .. } => ("bad-volume", Some(lane.clone()), None),
         RenderError::Range { lane, at, .. } => ("out-of-range", Some(lane.clone()), Some(*at)),
         RenderError::Shifted { lane, at, .. } => ("transposed-out-of-range", Some(lane.clone()), Some(*at)),
+        RenderError::Ornament { lane, at, flaw, .. } => (flaw.code(), Some(lane.clone()), Some(*at)),
         RenderError::Misfit { lane, at } => ("misfit", Some(lane.clone()), Some(*at)),
         RenderError::Mml(_) => ("renderer-bug", None, None),
     };
@@ -238,7 +304,7 @@ mod tests {
 
     #[test]
     fn a_voiced_lane_that_renders_silent_is_warned_with_its_place() {
-        let mute = Solo { pattern: "main".into(), lane: "noise".into(), line: 9, sounding: false, notes: vec![Ring { at: pos(1, 1), end: pos(1, 4), rest: false }] };
+        let mute = Solo { pattern: "main".into(), lane: "noise".into(), line: 9, sounding: false, notes: vec![Ring { at: pos(1, 1), end: pos(1, 4), rest: false }], flourishes: Vec::new() };
         let warned = hush(&mute).expect("a voiced silent lane should warn");
         assert_eq!((warned.code, warned.pattern.as_deref(), warned.lane.as_deref(), warned.at, warned.line), ("silent-lane", Some("main"), Some("noise"), None, Some(9)));
         assert_eq!(hush(&Solo { sounding: true, ..mute.clone() }), None);
@@ -367,5 +433,47 @@ mod tests {
         assert_eq!(stats["saturated_samples"], 0);
         let remark = Remark::loose("too-long", "x").json();
         for key in ["code", "message", "pattern", "lane", "at", "line"] { assert!(remark.get(key).is_some(), "{key} missing"); }
+    }
+
+    #[test]
+    fn check_reports_what_the_effects_really_do() {
+        let heard = take("song \"s\" tempo 120\npattern p bars 1 grid 16\nlane pulse1\n  1: A4 x8 vib 20ct 6hz 125ms\n  9: A4 x4 arp 0,4,7\nplay\n  p\n  p +12\n  p\n").unwrap();
+        let effects = &heard.stats.lanes[0].flourishes;
+        let [Flourish::Vibrato { at, hertz, delay_ms, swings }, Flourish::Arpeggio { steps: 30, rate, .. }] = &effects[..] else { panic!("{effects:?}") };
+        assert_eq!((*at, round(*hertz, 3), round(*delay_ms, 1), *rate), (pos(1, 1), 6.667, 133.3, 60.0));
+        assert_eq!(swings.iter().map(|s| (s.shift, s.ticks)).collect::<Vec<_>>(), [(0, 3), (12, 1)], "one swing per distinct play, ticks re-derived from the played root");
+        assert!(swings.iter().all(|s| s.up > s.down), "the register bends further up than down: {swings:?}");
+        let json = heard.stats.json();
+        assert_eq!(json["lanes"][0]["effects"][1], json!({ "at": "1.9", "effect": "arp", "steps": 30, "steps_per_second": 60.0 }));
+        assert_eq!(json["lanes"][0]["effects"][0]["swings"][1]["transpose"], 12);
+        let told = tell(None, &heard.stats, &[]);
+        assert!(told.contains("\n  1.1 vib: 6.667 Hz after 133 ms, swings +"), "{told}");
+        assert!(told.contains("; played +12, +"), "{told}");
+        assert!(told.contains("\n  1.9 arp: 30 steps, 60.0 a second"), "{told}");
+    }
+
+    #[test]
+    fn a_transposed_play_that_swings_off_the_chip_is_refused_at_the_note() {
+        let off = refusal("song \"s\" tempo 120\npattern p bars 1 grid 4\nlane pulse1\n  1: G#7 x4 vib 90ct 6hz\nplay\n  p\n  p +2\n");
+        assert_eq!((off.code, off.lane.as_deref(), off.at, off.line), ("vibrato-out-of-range", Some("pulse1"), Some(pos(1, 1)), Some(4)));
+        assert!(off.message.starts_with("played +2 (play line 7), the vibrato on A#7"), "{}", off.message);
+    }
+
+    #[test]
+    fn the_macro_cap_counts_the_whole_song() {
+        let bars = |name: &str, from: u32, n: u32| format!("pattern {name} bars 1 grid {n}\nlane pulse1\n{}", (1..=n).map(|b| format!("  {b}: C4 x1 vib 5ct {:.6}hz\n", 20.0 / f64::from(from + b))).collect::<String>());
+        let fits = take(&format!("song \"s\" tempo 255\n{}{}play\n  a\n  b\n  a\n", bars("a", 0, 64), bars("b", 64, 64))).unwrap();
+        assert_eq!(fits.stats.lanes.len(), 2);
+        let crowded = refusal(&format!("song \"s\" tempo 255\n{}{}play\n  a\n  b\n", bars("a", 0, 64), bars("b", 64, 65)));
+        assert_eq!((crowded.code, crowded.pattern.as_deref(), crowded.at), ("too-many-macros", Some("b"), Some(pos(1, 65))));
+    }
+
+    #[test]
+    fn an_unplayed_pattern_answers_for_its_effects_without_rendering() {
+        let hiss = refusal(&format!("{DUO}pattern ghost bars 1 grid 4\nlane noise\n  1: C4 x1 vib 20ct 6hz\nplay\n  a\n"));
+        assert_eq!((hiss.code, hiss.pattern.as_deref(), hiss.at, hiss.line), ("noise-pitch-effect", Some("ghost"), Some(pos(1, 1)), Some(10)));
+        let blink = refusal(&format!("{DUO}pattern ghost bars 4000000000 grid 255\nlane pulse1\n  1: C4 x1 fade\nplay\n  a\n"));
+        assert_eq!((blink.code, blink.pattern.as_deref(), blink.line), ("fade-too-short", Some("ghost"), Some(10)));
+        assert!(take(&format!("{DUO}pattern ghost bars 4000000000 grid 255\nlane pulse1\n  1: C4 x9 fade\n  4000000000.1: A4 x60 arp 0,4,7\nplay\n  a\n")).is_ok(), "a vast unplayed pattern is vetted note by note, never walked");
     }
 }

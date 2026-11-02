@@ -66,7 +66,49 @@ scientific pitch notation, C4 is middle C. sharps with `#` (`C#4`), flats with `
 
 ## lanes
 
-the profile defines which lanes exist and what they can do. for `nes`: `pulse1`, `pulse2`, `triangle`, `noise`. parameters follow the lane name (`lane pulse1 duty 25`); which parameters a lane accepts is also the profile's call. a lane appears at most once per pattern, and lanes you don't use can be omitted.
+the profile defines which lanes exist and what they can do. for `nes`: `pulse1`, `pulse2`, `triangle`, `noise`. parameters follow the lane name (`lane pulse1 duty 25 vol 9`); which parameters a lane accepts is also the profile's call. a lane appears at most once per pattern, and lanes you don't use can be omitted.
+
+on `nes`, the pulses take `duty` (12.5, 25, 50, or 75) and `vol` (0 to 15, default 10), the noise takes `vol`, and the triangle takes nothing: it has no volume, it's either on or off.
+
+## effects
+
+effects are extra words after the length. they belong to that one note, their order on the line means nothing, and every one starts with a keyword:
+
+| effect | spelling | example |
+|---|---|---|
+| vibrato | `vib <N>ct <N>hz [<N>ms]` | `G5 x12 vib 20ct 6hz 250ms` |
+| arpeggio | `arp <off>,<off>,...` | `A3 x16 arp 0,3,7` |
+| slide | `from <PITCH>` | `C5 x8 from A4` |
+| duty | `duty <width>` | `B4 x8 duty 12.5` |
+| volume | `vol <0-15>` | `C5 x4 vol 5` |
+| fade | `fade` | `A4 x16 vol 12 fade` |
+
+```
+lane pulse1 duty 25 vol 9
+  1.1:  E5 x4 vib 20ct 6hz 125ms
+  1.5:  G5 x4 duty 12.5
+  1.9:  C5 x4 from A4
+  1.13: B4 x4 vol 13 fade
+  2.1:  A4 x8 arp 0,4,7 vol 7
+```
+
+- **vib** shakes the pitch. depth is in cents (peak, not peak-to-peak), rate in hertz, delay in milliseconds and optional. units are case-blind (`6Hz` reads). the chip's rates are 20 Hz divided by a whole number (20, 10, 6.667, 5, 4, ...), so you get the nearest one, and an ask more than 25% from every rate is an error naming the two around it. the delay rounds to the nearest 1/60 s frame and tops out at 4250 ms. a delay that meets or outlasts the note is an error, since that vibrato would never start.
+- **the cents are an ask, not a promise.** the chip bends its period register, so depth compiles to whole register ticks, and one tick is a different number of cents on every pitch (it also climbs further than it falls). a depth that rounds to zero ticks, needs more than 255, or would drive the register through zero is an error. the checker range-checks the swing the rounded depth *really* makes, both edges, and `piro check` reports both.
+- **arp** cycles semitone offsets from the written note, about 60 steps a second. at least two offsets, signed, repeats allowed; the 0 is a habit, not a rule (`arp 4,7` leaves the root out and means it). the steps always add up to exactly the written length, and every offset has to get at least one step. the achieved rate is reported, and outside 45 to 75 steps a second it's an error saying what this tempo can do. some tempos can't arp at all, and the error says that too.
+- **from** is a slide, and the pitch column holds where it lands: `C5 x8 from A4` scoops up from A4 into C5. the walk is chromatic, a semitone per step at the arp's pace, and the target holds everything after. a note too short for every step plus a hold of the target is an error naming a length that fits. `from` its own pitch goes nowhere and is refused.
+- **duty** swaps the pulse width for this note only (same widths as the lane param). pulses only.
+- **vol** sets this note's volume, 0 to 15, over the lane's default. pulses and noise.
+- **fade** ramps from the note's starting volume (its `vol`, or the lane's) down to 0, and the last frame that sounds is the 0. the note has to span at least 2 frames. pulses and noise.
+
+the rules between them:
+
+- one pitch effect per note: `vib`, `arp`, or `from`. two is an error naming both.
+- `vol` and `duty` stack with anything. `fade` stacks with `vib` but not with `arp` or `from` (their steps would restart the fade every time).
+- effects on a rest are an error. a rest has nothing to bend, shake, or fade.
+- the noise lane refuses `vib`, `arp`, and `from` (its pitch is a timer setting), and the triangle refuses `vol` and `fade`.
+- nothing leaks: the note after an effect plays with the lane's own duty, volume, and steady pitch.
+- every pitch an effect reaches is checked against the profile like a written note: both vibrato edges, every arp offset, the slide's departure. with a `play` transpose, that check (and the cents-to-ticks rounding) runs again for each transposed play.
+- a song holds 128 different vibratos and 128 different fades. reusing the same settings is free; the 129th distinct one is an error.
 
 ## the song order
 
@@ -94,6 +136,8 @@ there are no sections or loop markers. a wav has to end somewhere anyway, and un
 
 every error names the lane, the bar, and the slot, in the same `bar.slot` syntax you write. the checker also prints each note's computed end position, so a seam like "does the bass stop exactly where the next note starts" is checkable by eye without doing the carry yourself.
 
+effects get the same treatment: for every vibrato it reports the rate and delay you actually got and both real swings in cents (once per transposed play), and for every arp its step count and steps a second.
+
 "end" always means **the last slot the note rings in**, inclusive. a note at `1.9` with `x16` rings through `2.8`, and the next note may start at `2.9`. a perfect seam is end + 1 = next start, never end = next start.
 
 two more facts the parser commits to, so they're spec now: notes within a lane may be written in any order (the checker sorts; position is truth, line order is convenience), and pattern names are unique per file (the play block references them by name).
@@ -101,7 +145,7 @@ two more facts the parser commits to, so they're spec now: notes within a lane m
 ## open questions
 
 - **the `x` sigil.** `x2` reads as "play twice" to anyone with tracker habits. it might need to be a different character, or nothing at all.
-- **effects and ornaments.** vibrato, arpeggio, slides, duty changes mid-note: deliberately absent from v0. they're half the chip sound, so they're coming, but they're a design of their own.
+- **fade over steps.** a fading arpeggio is the classic ending, and right now it's refused. it needs the fade sliced across the arp's steps, and that's the first thing on the effects list.
 - **the noise lane.** noise "pitch" is one of 16 timer settings, not a note. probably its own small notation, defined by the profile.
 - **retrigger.** two back-to-back notes of the same pitch: does the envelope restart? (it should, but the engine has to actually do it.)
 - **strict mode.** an opt-in check that every slot in every bar is accounted for, notes or written rests, no silent gaps. probably a flag on `piro check`.

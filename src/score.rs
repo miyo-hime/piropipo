@@ -1,4 +1,9 @@
+use crate::profile::{self, Breach};
 use std::fmt;
+
+const MARKS: [&str; 6] = ["vib", "arp", "from", "duty", "vol", "fade"];
+
+const BENDS: [&str; 3] = ["vib", "arp", "from"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Position { pub bar: u32, pub slot: u32 }
@@ -17,23 +22,44 @@ impl fmt::Display for Position {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "{}.{}", self.bar, self.slot) }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Note { pub at: Position, pub pitch: Option<u8>, pub len: u32, pub line: usize }
+#[derive(Debug, Clone, PartialEq)]
+pub struct Note { pub at: Position, pub pitch: Option<u8>, pub len: u32, pub line: usize, pub ornaments: Ornaments }
 
 impl Note {
     pub fn rings_through(&self, grid: u32) -> Position { Position::from_tick((self.at.tick(grid) + u64::from(self.len)).saturating_sub(1), grid) }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Ornaments { pub bend: Option<Bend>, pub duty: Option<u8>, pub vol: Option<u8>, pub fade: bool }
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Bend { Vibrato(Vibrato), Arpeggio(Vec<i16>), Slide(u8) }
+
+impl Bend {
+    pub fn word(&self) -> &'static str {
+        match self { Bend::Vibrato(_) => "vib", Bend::Arpeggio(_) => "arp", Bend::Slide(_) => "from" }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Vibrato { pub cents: f64, pub speed: u8, pub delay: u8 }
+
+impl Vibrato {
+    pub fn hertz(self) -> f64 { 20.0 / f64::from(self.speed) }
+
+    pub fn delay_ms(self) -> f64 { f64::from(self.delay) * 1000.0 / 60.0 }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Lane { pub name: String, pub params: Vec<(String, String)>, pub notes: Vec<Note>, pub line: usize }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Pattern { pub name: String, pub bars: u32, pub grid: u32, pub lanes: Vec<Lane>, pub line: usize }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cue { pub pattern: String, pub shift: i8, pub line: usize }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Song { pub title: String, pub tempo: u32, pub profile: Option<String>, pub patterns: Vec<Pattern>, pub setlist: Vec<Cue> }
 
 impl Song {
@@ -87,6 +113,22 @@ pub enum Fault {
     BadLength(String),
     Silent,
     Leftover(String),
+    BareVibrato,
+    VibratoMeasure(String),
+    VibratoMissing(&'static str),
+    VibratoTwice(String),
+    RateUnreachable(String),
+    RateBetween { word: String, faster: u16, slower: u16 },
+    DelayUnreachable(String),
+    BadArp(String),
+    LoneArp(String),
+    BadDeparture(String),
+    Standstill(String),
+    BadDuty(String),
+    BadVolume(String),
+    SecondBend { first: &'static str, second: &'static str },
+    FadeOverSteps(&'static str),
+    RestEffect(&'static str),
     BarZero,
     SlotZero,
     BarPastEnd { bar: u32, bars: u32 },
@@ -128,6 +170,17 @@ impl Fault {
             Fault::BadLength(_) => "bad-length",
             Fault::Silent => "zero-length",
             Fault::Leftover(_) => "leftover",
+            Fault::BareVibrato | Fault::VibratoMeasure(_) | Fault::VibratoMissing(_) | Fault::VibratoTwice(_) => "bad-vibrato",
+            Fault::RateUnreachable(_) | Fault::RateBetween { .. } => "vibrato-rate",
+            Fault::DelayUnreachable(_) => "vibrato-delay",
+            Fault::BadArp(_) | Fault::LoneArp(_) => "bad-arp",
+            Fault::BadDeparture(_) => "bad-slide",
+            Fault::Standstill(_) => "slide-goes-nowhere",
+            Fault::BadDuty(_) => "bad-duty",
+            Fault::BadVolume(_) => "bad-volume",
+            Fault::SecondBend { .. } => "two-pitch-effects",
+            Fault::FadeOverSteps(_) => "fade-over-steps",
+            Fault::RestEffect(_) => "effect-on-rest",
             Fault::BarZero => "bar-zero",
             Fault::SlotZero => "slot-zero",
             Fault::BarPastEnd { .. } => "bar-past-end",
@@ -171,7 +224,24 @@ impl fmt::Display for Fault {
             Fault::NoLength => write!(f, "missing a length; add how many slots the note rings, like `x4`"),
             Fault::BadLength(word) => write!(f, "`{word}` isn't a length; write `x` and a slot count, like `x4`"),
             Fault::Silent => write!(f, "`x0` rings for no slots at all; the shortest note is `x1`"),
-            Fault::Leftover(text) => write!(f, "unexpected `{text}` after the length; a note line is just `bar.slot: PITCH xLEN`"),
+            Fault::Leftover(text) => write!(f, "unexpected `{text}` after the length; a note line is `bar.slot: PITCH xLEN`, then any of the effects {}", MARKS.map(|m| format!("`{m}`")).join(", ")),
+            Fault::BareVibrato => write!(f, "`vib` needs a depth and a rate, like `vib 20ct 6hz`, and takes an optional delay, like `250ms`"),
+            Fault::VibratoMeasure(word) => write!(f, "`{word}` isn't a vibrato measure; write a number and its unit: `20ct` for depth, `6hz` for rate, `250ms` for delay"),
+            Fault::VibratoMissing("ct") => write!(f, "`vib` needs a depth in cents, like `20ct`"),
+            Fault::VibratoMissing(_) => write!(f, "`vib` needs a rate in hertz, like `6hz`"),
+            Fault::VibratoTwice(word) => write!(f, "`{word}` is a second measure of the same kind; `vib` takes one depth (`ct`), one rate (`hz`), and one delay (`ms`)"),
+            Fault::RateUnreachable(word) => write!(f, "`{word}` is outside the chip's vibrato; its rates run from 20 Hz down to 20/255 Hz (about 0.0785)"),
+            Fault::RateBetween { word, faster, slower } => write!(f, "`{word}` falls between the chip's vibrato rates {} Hz and {} Hz, more than 25% from either; ask for one of those", hertz(*faster), hertz(*slower)),
+            Fault::DelayUnreachable(word) => write!(f, "`{word}` is past the vibrato's longest delay, 4250 ms (255 frames)"),
+            Fault::BadArp(word) => write!(f, "`{word}` isn't an arp; write signed semitone offsets as one comma-joined word, like `arp 0,4,7`"),
+            Fault::LoneArp(word) => write!(f, "`arp {word}` names one offset; an arp cycles through at least two, like `arp 0,{word}`"),
+            Fault::BadDeparture(word) => write!(f, "`from {word}` needs a departure pitch, like `from A4`; the note's own pitch is where the slide lands"),
+            Fault::Standstill(word) => write!(f, "`from {word}` departs from the note's own pitch, so there's nothing to slide; drop the `from` or name another departure"),
+            Fault::BadDuty(word) => write!(f, "{}", Breach::Duty(word.clone())),
+            Fault::BadVolume(word) => write!(f, "`vol {word}` isn't a volume the chip has; pick a whole number from 0 to 15"),
+            Fault::SecondBend { first, second } => write!(f, "`{first}` and `{second}` both bend this note's pitch; a note takes one pitch effect at most"),
+            Fault::FadeOverSteps(word) => write!(f, "`fade` can't ride `{word}`: every step restarts the chip's volume envelope, so the fade would reset each time; fade a plain or `vib` note instead"),
+            Fault::RestEffect(word) => write!(f, "`{word}` on a rest; a rest has nothing to bend, shake, or fade"),
             Fault::BarZero => write!(f, "there is no bar 0; bars count from 1"),
             Fault::SlotZero => write!(f, "there is no slot 0; slots count from 1"),
             Fault::BarPastEnd { bar, bars } => write!(f, "bar {bar} is past the end; this pattern has {bars} bar{}", s(u64::from(*bars))),
@@ -328,14 +398,15 @@ impl Copyist {
             }
         };
         if len == Some(0) { faults.push(Fault::Silent); }
-        let leftover: Vec<&str> = words.collect();
-        if !leftover.is_empty() { faults.push(Fault::Leftover(leftover.join(" "))); }
+        let (ornaments, marks) = adorn(words, &mut faults);
+        if let (Some(None), Some(&first)) = (pitch, marks.first()) { faults.push(Fault::RestEffect(first)); }
+        if let (Some(Some(target)), Some(Bend::Slide(from))) = (pitch, &ornaments.bend) && target == *from { faults.push(Fault::Standstill(profile::named(*from))); }
         let clean = faults.is_empty();
         for fault in faults { self.blame(line, Some(at), fault); }
         if let (true, Pen::Writing, Some(pitch), Some(len)) = (clean, &self.pen, pitch, len)
             && let Some(lane) = self.sheets.last_mut().and_then(|s| s.pattern.lanes.last_mut())
         {
-            lane.notes.push(Note { at, pitch, len, line });
+            lane.notes.push(Note { at, pitch, len, line, ornaments });
         }
     }
 
@@ -433,6 +504,83 @@ fn read_shift(word: &str) -> Result<i8, Fault> {
     let steps = word.strip_prefix('+').or_else(|| word.strip_prefix('-')).and_then(whole).ok_or_else(|| Fault::BadShift(word.into()))?;
     let steps = i8::try_from(steps).map_err(|_| Fault::FarShift(word.into()))?;
     Ok(if word.starts_with('-') { -steps } else { steps })
+}
+
+fn adorn<'w>(words: impl Iterator<Item = &'w str>, faults: &mut Vec<Fault>) -> (Ornaments, Vec<&'static str>) {
+    let mut words = words.peekable();
+    let mut ornaments = Ornaments::default();
+    let mut marks: Vec<&'static str> = Vec::new();
+    while let Some(word) = words.next() {
+        let Some(&mark) = MARKS.iter().find(|m| **m == word) else { faults.push(Fault::Leftover(word.into())); continue };
+        if marks.contains(&mark) { faults.push(Fault::RepeatedParam(mark.into())); }
+        else if let Some(first) = marks.iter().copied().find(|m| BENDS.contains(m)).filter(|_| BENDS.contains(&mark)) { faults.push(Fault::SecondBend { first, second: mark }); }
+        marks.push(mark);
+        if mark == "fade" { ornaments.fade = true; continue; }
+        if mark == "vib" {
+            let measures: Vec<&str> = std::iter::from_fn(|| words.next_if(|w| w.starts_with(|c: char| c.is_ascii_digit() || c == '.'))).collect();
+            match shake(&measures) { Ok(vib) => ornaments.bend = Some(Bend::Vibrato(vib)), Err(fault) => faults.push(fault) }
+            continue;
+        }
+        let Some(value) = words.next_if(|w| !MARKS.contains(w)) else { faults.push(Fault::NoValue(mark.into())); continue };
+        let read = match mark {
+            "arp" => read_offsets(value).map(|offsets| ornaments.bend = Some(Bend::Arpeggio(offsets))),
+            "from" => read_pitch(value).map(|from| ornaments.bend = Some(Bend::Slide(from))).ok_or_else(|| Fault::BadDeparture(value.into())),
+            "duty" => profile::width(value).map(|duty| ornaments.duty = Some(duty)).ok_or_else(|| Fault::BadDuty(value.into())),
+            _ => profile::level(value).map(|vol| ornaments.vol = Some(vol)).ok_or_else(|| Fault::BadVolume(value.into())),
+        };
+        if let Err(fault) = read { faults.push(fault); }
+    }
+    if let Some(steps) = marks.iter().copied().find(|m| matches!(*m, "arp" | "from")).filter(|_| ornaments.fade) { faults.push(Fault::FadeOverSteps(steps)); }
+    (ornaments, marks)
+}
+
+fn shake(measures: &[&str]) -> Result<Vibrato, Fault> {
+    if measures.is_empty() { return Err(Fault::BareVibrato); }
+    let mut found: [Option<(&str, f64)>; 3] = [None; 3];
+    for word in measures {
+        let units = ["ct", "hz", "ms"];
+        let cut = word.len().saturating_sub(2);
+        let (Some(number), Some(unit)) = (word.get(..cut), word.get(cut..)) else { return Err(Fault::VibratoMeasure((*word).into())) };
+        let (Some(slot), Some(value)) = (units.iter().position(|u| u.eq_ignore_ascii_case(unit)), measure(number)) else { return Err(Fault::VibratoMeasure((*word).into())) };
+        if found[slot].is_some() { return Err(Fault::VibratoTwice((*word).into())); }
+        found[slot] = Some((*word, value));
+    }
+    let [Some((_, cents)), Some((rate, hz)), delay] = found else { return Err(Fault::VibratoMissing(if found[0].is_none() { "ct" } else { "hz" })) };
+    let delay = match delay {
+        Some((word, ms)) if ms > 4250.0 => return Err(Fault::DelayUnreachable(word.into())),
+        Some((_, ms)) => (ms * 60.0 / 1000.0).round() as u8,
+        None => 0,
+    };
+    Ok(Vibrato { cents, speed: lfo_speed(rate, hz)?, delay })
+}
+
+fn lfo_speed(word: &str, hz: f64) -> Result<u8, Fault> {
+    if !(20.0 / 255.0..=20.0).contains(&hz) { return Err(Fault::RateUnreachable(word.into())); }
+    let faster = (20.0 / hz).floor().clamp(1.0, 255.0) as u16;
+    let slower = faster + 1;
+    let off = |speed: u16| (20.0 / f64::from(speed) - hz).abs();
+    let speed = if slower <= 255 && off(slower) <= off(faster) { slower } else { faster };
+    if off(speed) > hz * 0.25 { return Err(Fault::RateBetween { word: word.into(), faster, slower }); }
+    Ok(u8::try_from(speed).expect("a speed past 255 is out of the domain checked above"))
+}
+
+fn hertz(speed: u16) -> String { format!("{:.3}", 20.0 / f64::from(speed)).trim_end_matches('0').trim_end_matches('.').to_owned() }
+
+fn measure(text: &str) -> Option<f64> {
+    let (int, frac) = text.split_once('.').unwrap_or((text, "0"));
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits(int) || !digits(frac) { return None; }
+    text.parse().ok()
+}
+
+fn read_offsets(word: &str) -> Result<Vec<i16>, Fault> {
+    let offsets = word.split(',').map(|o| {
+        let digits = o.strip_prefix(['+', '-']).unwrap_or(o);
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) { return None; }
+        o.parse().ok()
+    }).collect::<Option<Vec<i16>>>().ok_or_else(|| Fault::BadArp(word.into()))?;
+    if offsets.len() < 2 { return Err(Fault::LoneArp(word.into())); }
+    Ok(offsets)
 }
 
 fn read_pitch(word: &str) -> Option<u8> {
@@ -670,5 +818,85 @@ mod tests {
         for (word, steps) in [("+3", 3), ("-12", -12), ("+0", 0), ("-0", 0), ("+127", 127), ("-127", -127)] { assert_eq!(read_shift(word), Ok(steps), "{word}"); }
         for junk in ["3", "x2", "+", "+-3", "++3", "+3.5", "-x"] { assert_eq!(read_shift(junk), Err(Fault::BadShift(junk.into())), "{junk:?} should not read"); }
         assert_eq!(read_shift("-128"), Err(Fault::FarShift("-128".into())));
+    }
+
+    fn adorned(note: &str) -> Ornaments { Song::parse(&format!("{TWO_BARS}  1.1: {note}\n")).unwrap_or_else(|e| panic!("{note}: {e:?}")).patterns[0].lanes[0].notes[0].ornaments.clone() }
+
+    fn refused(note: &str) -> Vec<Fault> { faults(&format!("{TWO_BARS}  1.1: {note}\n")) }
+
+    #[test]
+    fn effects_ride_after_the_length_in_any_order() {
+        assert_eq!(adorned("C4 x4"), Ornaments::default());
+        assert_eq!(adorned("G5 x12 vib 20ct 6hz 250ms").bend, Some(Bend::Vibrato(Vibrato { cents: 20.0, speed: 3, delay: 15 })));
+        assert_eq!(adorned("G5 x12 vib 250MS 6Hz 20CT").bend, adorned("G5 x12 vib 20ct 6hz 250ms").bend, "units are case-blind and self-describing");
+        assert_eq!(adorned("G5 x12 vib 12.5ct 0.08hz").bend, Some(Bend::Vibrato(Vibrato { cents: 12.5, speed: 250, delay: 0 })));
+        assert_eq!(adorned("A3 x16 arp 0,3,7").bend, Some(Bend::Arpeggio(vec![0, 3, 7])));
+        assert_eq!(adorned("A3 x16 arp 4,-5,+12,4").bend, Some(Bend::Arpeggio(vec![4, -5, 12, 4])));
+        assert_eq!(adorned("C5 x8 from A4").bend, Some(Bend::Slide(69)));
+        assert_eq!(adorned("B4 x8 duty 12.5").duty, Some(0));
+        assert_eq!(adorned("C5 x4 vol 5").vol, Some(5));
+        let stacked = adorned("A4 x16 fade duty 75 vol 12 vib 10ct 5hz");
+        assert_eq!(stacked, Ornaments { bend: Some(Bend::Vibrato(Vibrato { cents: 10.0, speed: 4, delay: 0 })), duty: Some(3), vol: Some(12), fade: true });
+        assert_eq!(adorned("A4 x16 arp 0,4 vol 0").vol, Some(0), "vol stacks with any pitch effect");
+    }
+
+    #[test]
+    fn malformed_effects_teach_the_spelling() {
+        assert_eq!(refused("C4 x4 vib"), [Fault::BareVibrato]);
+        assert_eq!(refused("C4 x4 vib 20 6hz"), [Fault::VibratoMeasure("20".into())]);
+        assert_eq!(refused("C4 x4 vib 2.5.5ct 6hz"), [Fault::VibratoMeasure("2.5.5ct".into())]);
+        assert_eq!(refused("C4 x4 vib 20cents 6hz"), [Fault::VibratoMeasure("20cents".into())]);
+        assert_eq!(refused("C4 x4 vib 6hz"), [Fault::VibratoMissing("ct")]);
+        assert_eq!(refused("C4 x4 vib 20ct 250ms"), [Fault::VibratoMissing("hz")]);
+        assert_eq!(refused("C4 x4 vib 20ct 6hz 30ct"), [Fault::VibratoTwice("30ct".into())]);
+        assert_eq!(refused("C4 x4 arp"), [Fault::NoValue("arp".into())]);
+        assert_eq!(refused("C4 x4 arp 0, 4, 7"), [Fault::BadArp("0,".into()), Fault::Leftover("4,".into()), Fault::Leftover("7".into())]);
+        for junk in ["0,,7", "0,4,", "a,b", "0.4", "+-3,4", "0,99999"] { assert_eq!(refused(&format!("C4 x4 arp {junk}")), [Fault::BadArp(junk.into())], "{junk}"); }
+        assert_eq!(refused("C4 x4 arp 7"), [Fault::LoneArp("7".into())]);
+        assert_eq!(refused("C4 x4 from"), [Fault::NoValue("from".into())]);
+        assert_eq!(refused("C4 x4 from a4"), [Fault::BadDeparture("a4".into())]);
+        assert_eq!(refused("C4 x4 from C4"), [Fault::Standstill("C4".into())]);
+        assert_eq!(refused("C4 x4 duty 33"), [Fault::BadDuty("33".into())]);
+        assert_eq!(refused("C4 x4 vol 16"), [Fault::BadVolume("16".into())]);
+        assert_eq!(refused("C4 x4 vol fade"), [Fault::NoValue("vol".into())]);
+        assert_eq!(refused("C4 x4 vol 3 vol 4"), [Fault::RepeatedParam("vol".into())]);
+        assert_eq!(refused("C4 x4 fade fade"), [Fault::RepeatedParam("fade".into())]);
+        assert_eq!(refused("C4 x4 wobble"), [Fault::Leftover("wobble".into())]);
+        let said: Vec<String> = Song::parse(&format!("{TWO_BARS}  1.1: C4 x4 arp 0, 4\n")).unwrap_err().iter().map(ToString::to_string).collect();
+        assert_eq!(said[0], "line 4, pattern main, lane triangle, at 1.1: `0,` isn't an arp; write signed semitone offsets as one comma-joined word, like `arp 0,4,7`");
+        assert_eq!(Fault::BadDuty("33".into()).to_string(), "duty `33` isn't a pulse width the chip has; pick `12.5`, `25`, `50`, or `75`");
+    }
+
+    #[test]
+    fn vibrato_rates_and_delays_stay_inside_the_engine() {
+        assert_eq!(refused("C4 x4 vib 20ct 21hz"), [Fault::RateUnreachable("21hz".into())]);
+        assert_eq!(refused("C4 x4 vib 20ct 0.07hz"), [Fault::RateUnreachable("0.07hz".into())]);
+        assert_eq!(refused("C4 x4 vib 20ct 15hz"), [Fault::RateBetween { word: "15hz".into(), faster: 1, slower: 2 }]);
+        assert_eq!(Fault::RateBetween { word: "15hz".into(), faster: 1, slower: 2 }.to_string(), "`15hz` falls between the chip's vibrato rates 20 Hz and 10 Hz, more than 25% from either; ask for one of those");
+        assert_eq!(adorned("C4 x4 vib 20ct 12.5hz").bend, Some(Bend::Vibrato(Vibrato { cents: 20.0, speed: 2, delay: 0 })), "10 Hz is 20% under the ask, inside the band");
+        assert_eq!(adorned("C4 x4 vib 20ct 8.5hz").bend, Some(Bend::Vibrato(Vibrato { cents: 20.0, speed: 2, delay: 0 })), "8.5 sits nearer 10 than 6.67");
+        assert_eq!(adorned("C4 x4 vib 20ct 8hz").bend, Some(Bend::Vibrato(Vibrato { cents: 20.0, speed: 3, delay: 0 })), "8 is 1.33 from 6.67 and 2 from 10");
+        assert_eq!(adorned("C4 x4 vib 20ct 4.5hz").bend, Some(Bend::Vibrato(Vibrato { cents: 20.0, speed: 5, delay: 0 })), "a tie between 5 and 4 goes slower");
+        assert_eq!(adorned("C4 x4 vib 20ct 20hz 4250ms").bend, Some(Bend::Vibrato(Vibrato { cents: 20.0, speed: 1, delay: 255 })));
+        assert_eq!(refused("C4 x4 vib 20ct 6hz 4251ms"), [Fault::DelayUnreachable("4251ms".into())]);
+        assert_eq!(adorned("C4 x4 vib 20ct 6hz 8ms").bend, Some(Bend::Vibrato(Vibrato { cents: 20.0, speed: 3, delay: 0 })), "8 ms rounds to frame 0");
+    }
+
+    #[test]
+    fn composition_laws_are_checked_at_the_line() {
+        assert_eq!(refused("C4 x4 vib 20ct 6hz arp 0,4"), [Fault::SecondBend { first: "vib", second: "arp" }]);
+        assert_eq!(refused("C4 x4 from A3 vib 20ct 6hz"), [Fault::SecondBend { first: "from", second: "vib" }]);
+        assert_eq!(refused("C4 x4 arp 0,4 fade"), [Fault::FadeOverSteps("arp")]);
+        assert_eq!(refused("C4 x4 fade from G3"), [Fault::FadeOverSteps("from")]);
+        assert!(Song::parse(&format!("{TWO_BARS}  1.1: C4 x4 fade vib 10ct 5hz duty 25 vol 9\n")).is_ok(), "fade rides a vibrato, and duty and vol ride anything");
+        assert_eq!(Fault::SecondBend { first: "vib", second: "arp" }.to_string(), "`vib` and `arp` both bend this note's pitch; a note takes one pitch effect at most");
+    }
+
+    #[test]
+    fn effects_on_rests_are_refused() {
+        assert_eq!(refused("- x4 vib 20ct 6hz"), [Fault::RestEffect("vib")]);
+        assert_eq!(refused("- x4 vol 3 fade"), [Fault::RestEffect("vol")]);
+        assert_eq!(Fault::RestEffect("fade").to_string(), "`fade` on a rest; a rest has nothing to bend, shake, or fade");
+        assert_eq!(Fault::RestEffect("fade").code(), "effect-on-rest");
     }
 }
