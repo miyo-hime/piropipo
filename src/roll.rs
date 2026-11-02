@@ -58,7 +58,7 @@ pub fn run(args: Args, human: bool) -> Result<(), Box<dyn std::error::Error>> {
 
 fn unroll(args: &Args) -> Result<(PathBuf, Song, [usize; 2]), Vec<Blot>> {
     let origin = (args.input != "-").then(|| Path::new(&args.input));
-    let target = land_beside(origin, args.output.clone(), "png").map_err(|why| vec![blot("no-output", why)])?;
+    let target = land_beside(origin, args.output.clone(), "png").map_err(|(code, why)| vec![blot(code, why)])?;
     let (text, _) = read_source(&args.input).map_err(|e| vec![blot("unreadable-input", format!("can't read {}: {e}", origin.map_or("stdin".into(), |p| p.display().to_string())))])?;
     let song = Song::parse(&text).map_err(|errors| errors.iter().map(misprint).collect::<Vec<_>>())?;
     let canvas = roll(&song).map_err(|why| vec![blot("too-large", why)])?;
@@ -166,7 +166,7 @@ impl Canvas {
     fn fill(&mut self, x: usize, y: usize, w: usize, h: usize, rgb: Rgb) {
         let (right, bottom) = ((x + w).min(self.width), (y + h).min(self.height));
         if x >= right { return; }
-        for row in y..bottom { self.ink[(row * self.width + x) * 3..(row * self.width + right) * 3].chunks_exact_mut(3).for_each(|px| px.copy_from_slice(&rgb)); }
+        for row in y..bottom { self.ink[(row * self.width + x) * 3..(row * self.width + right) * 3].as_chunks_mut::<3>().0.iter_mut().for_each(|px| *px = rgb); }
     }
 
     fn write(&mut self, x: usize, y: usize, text: &str, scale: usize, rgb: Rgb) -> usize {

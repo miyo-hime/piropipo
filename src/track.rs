@@ -15,14 +15,11 @@ pub fn run(args: Args, human: bool) -> Result<(), Box<dyn std::error::Error>> { 
 
 fn press(args: Args) -> Result<(Option<PathBuf>, Take), Vec<Remark>> {
     let origin = (args.input != "-").then(|| Path::new(&args.input));
-    let dest = surface::land_beside(origin, args.output, "wav").map_err(|why| vec![Remark::loose("needs-output", why)])?;
-    if origin.is_some_and(|src| same_file(src, &dest)) { return Err(vec![Remark::loose("output-is-input", format!("the wav would land on top of the input {}; pick another -o", dest.display()))]); }
+    let dest = surface::land_beside(origin, args.output, "wav").map_err(|(code, why)| vec![Remark::loose(code, why)])?;
     let take = listen::take(&listen::read(&args.input)?)?;
     publish(&dest, &take.samples).map_err(|e| vec![Remark::loose("unwritable-output", format!("can't write {}: {e}", dest.display()))])?;
     Ok((Some(dest), take))
 }
-
-fn same_file(a: &Path, b: &Path) -> bool { std::fs::canonicalize(a).ok().is_some_and(|a| std::fs::canonicalize(b).ok() == Some(a)) }
 
 fn publish(dest: &Path, samples: &[i16]) -> std::io::Result<()> {
     surface::publish(dest, &surface::pressed(samples, u32::from(SAMPLE_RATE)).map_err(std::io::Error::other)?)
@@ -41,7 +38,7 @@ mod tests {
     #[test]
     fn stdin_without_o_is_refused_before_reading_anything() {
         let Err(errors) = press(Args { input: "-".into(), output: None }) else { panic!("stdin with no -o should refuse") };
-        assert_eq!(errors.iter().map(|e| e.code).collect::<Vec<_>>(), ["needs-output"]);
+        assert_eq!(errors.iter().map(|e| e.code).collect::<Vec<_>>(), ["no-output"]);
     }
 
     #[test]
@@ -75,7 +72,7 @@ mod tests {
         let score = dir.join("ding.piro");
         std::fs::write(&score, "song \"ding\" tempo 120\n").unwrap();
         let Err(errors) = press(Args { input: score.to_string_lossy().into(), output: Some(score.clone()) }) else { panic!("-o onto the input should refuse") };
-        assert_eq!(errors[0].code, "output-is-input");
+        assert_eq!(errors[0].code, "output-eats-input");
         assert_eq!(std::fs::read_to_string(&score).unwrap(), "song \"ding\" tempo 120\n");
         std::fs::remove_dir_all(dir).unwrap();
     }
