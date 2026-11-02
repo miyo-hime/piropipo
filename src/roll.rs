@@ -299,7 +299,7 @@ mod tests {
     use piropipo::score::Fault;
 
     fn spec_example() -> &'static str {
-        let doc = include_str!("../docs/format.md");
+        let doc = include_str!("../skills/piropipo/references/format.md");
         let (_, opened) = doc.split_once("```\n").expect("format.md lost its example");
         opened.split_once("```").expect("format.md example fence never closes").0
     }

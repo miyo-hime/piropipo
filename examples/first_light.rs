@@ -1,6 +1,6 @@
 use piropipo::{render, score::Song};
 
-const SPEC: &str = include_str!("../docs/format.md");
+const SPEC: &str = include_str!("../skills/piropipo/references/format.md");
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let score = SPEC.split_once("```\n").and_then(|(_, opened)| opened.split_once("```")).ok_or("format.md lost its example")?.0;
