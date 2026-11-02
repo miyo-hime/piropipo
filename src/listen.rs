@@ -1,6 +1,7 @@
 use crate::surface;
+use piropipo::profile::{self, Breach, Charge};
 use piropipo::render::{self, RenderError, SAMPLE_RATE};
-use piropipo::score::{Lane, Pattern, Position, ScoreError, Song};
+use piropipo::score::{Cue, Lane, Pattern, Position, ScoreError, Song};
 use serde_json::{Value, json};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -72,10 +73,14 @@ pub fn take(text: &str) -> Result<Take, Vec<Remark>> {
     if let Some(remark) = overlong(&song) { return Err(vec![remark]); }
     let mut samples = Vec::new();
     let mut lanes = Vec::new();
-    for pattern in &song.patterns {
-        samples.extend(render::pattern(&song, pattern).map_err(|e| vec![misheard(e, pattern)])?);
-        for lane in &pattern.lanes { lanes.push(solo(&song, pattern, lane)?); }
+    for (i, cue) in song.setlist.iter().enumerate() {
+        let pattern = song.pattern(&cue.pattern).expect("the copyist refuses a play line that names no pattern");
+        samples.extend(render::transposed(&song, pattern, cue).and_then(|moved| render::pattern(&song, &moved)).map_err(|e| vec![misheard(e, pattern)])?);
+        if song.setlist.iter().take(i).any(|c| c.pattern == cue.pattern) { continue; }
+        for lane in &pattern.lanes { lanes.push(solo(&song, pattern, cue, lane)?); }
     }
+    let haunted = ghosts(&song);
+    if !haunted.is_empty() { return Err(haunted); }
     let stats = Stats { seconds: round(samples.len() as f64 / f64::from(SAMPLE_RATE), 3), peak_dbfs: peak_dbfs(&samples), saturated: saturated(&samples), lanes };
     let mut warnings: Vec<Remark> = stats.lanes.iter().filter_map(hush).collect();
     if stats.saturated > 0 { warnings.push(Remark::loose("saturation", format!("{} sample{} sit at full scale; the mix is hitting the rail and may be clipping", stats.saturated, if stats.saturated == 1 { "" } else { "s" }))); }
@@ -110,18 +115,37 @@ fn tell(output: Option<&Path>, stats: &Stats, warnings: &[Remark]) -> String {
 }
 
 fn overlong(song: &Song) -> Option<Remark> {
-    let bars: u64 = song.patterns.iter().map(|p| u64::from(p.bars)).sum();
+    let bars: u64 = song.setlist.iter().filter_map(|cue| song.pattern(&cue.pattern)).map(|p| u64::from(p.bars)).sum();
     let tempo = u64::from(song.tempo);
     (bars * 240 > CAP_SECONDS * tempo).then(|| Remark::loose("too-long", format!("the song runs {:.1} seconds ({bars} bar{} at tempo {tempo}), past the {} minute cap", (bars * 240) as f64 / tempo as f64, if bars == 1 { "" } else { "s" }, CAP_SECONDS / 60)))
 }
 
-fn solo(song: &Song, pattern: &Pattern, lane: &Lane) -> Result<Solo, Vec<Remark>> {
+fn ghosts(song: &Song) -> Vec<Remark> {
+    let Ok(card) = profile::card(song.profile.as_deref()) else { return Vec::new() };
+    let unplayed = song.patterns.iter().filter(|p| !song.setlist.iter().any(|c| c.pattern == p.name));
+    unplayed.flat_map(|p| card.audit(p).into_iter().map(|charge| indicted(p, &charge)).collect::<Vec<_>>()).collect()
+}
+
+fn indicted(pattern: &Pattern, charge: &Charge) -> Remark {
+    let (code, at) = match &charge.breach {
+        Breach::Profile(_) => ("unknown-profile", None),
+        Breach::Lane(_) => ("unknown-lane", None),
+        Breach::Param { .. } => ("unknown-param", None),
+        Breach::Volume(_) => ("no-volume-knob", None),
+        Breach::Duty(_) => ("bad-duty", None),
+        Breach::Range { at, .. } => ("out-of-range", Some(*at)),
+    };
+    let line = charge.note.map_or(charge.lane.line, |n| n.line);
+    Remark { code, message: charge.breach.to_string(), pattern: Some(pattern.name.clone()), lane: Some(charge.lane.name.clone()), at, line: Some(line) }
+}
+
+fn solo(song: &Song, pattern: &Pattern, cue: &Cue, lane: &Lane) -> Result<Solo, Vec<Remark>> {
     let mut notes: Vec<Ring> = lane.notes.iter().map(|n| Ring { at: n.at, end: n.rings_through(pattern.grid), rest: n.pitch.is_none() }).collect();
     notes.sort_by_key(|r| r.at);
     let mut heard = Solo { pattern: pattern.name.clone(), lane: lane.name.clone(), line: lane.line, sounding: false, notes };
     if heard.voiced() {
         let alone = Pattern { name: pattern.name.clone(), lanes: vec![lane.clone()], ..*pattern };
-        heard.sounding = render::pattern(song, &alone).map_err(|e| vec![misheard(e, pattern)])?.iter().any(|s| *s != 0);
+        heard.sounding = render::transposed(song, &alone, cue).and_then(|moved| render::pattern(song, &moved)).map_err(|e| vec![misheard(e, pattern)])?.iter().any(|s| *s != 0);
     }
     Ok(heard)
 }
@@ -149,6 +173,7 @@ fn misheard(e: RenderError, pattern: &Pattern) -> Remark {
         RenderError::Volume { lane, .. } => ("no-volume-knob", Some(lane.clone()), None),
         RenderError::Duty { lane, .. } => ("bad-duty", Some(lane.clone()), None),
         RenderError::Range { lane, at, .. } => ("out-of-range", Some(lane.clone()), Some(*at)),
+        RenderError::Shifted { lane, at, .. } => ("transposed-out-of-range", Some(lane.clone()), Some(*at)),
         RenderError::Misfit { lane, at } => ("misfit", Some(lane.clone()), Some(*at)),
         RenderError::Mml(_) => ("renderer-bug", None, None),
     };
@@ -257,6 +282,59 @@ mod tests {
         assert_eq!(heard.stats.seconds, 6.0);
         assert!(heard.samples[..88_200].iter().any(|s| *s != 0));
         assert!(heard.samples[88_200..].iter().all(|s| *s == 0));
+    }
+
+    const DUO: &str = "song \"s\" tempo 120\npattern a bars 1 grid 4\nlane pulse1\n  1: C4 x4\npattern b bars 1 grid 4\nlane triangle\n  1: - x4\n";
+
+    #[test]
+    fn the_play_block_is_what_plays() {
+        let once = take(&format!("{DUO}play\n  a\n")).unwrap();
+        let heard = take(&format!("{DUO}play\n  b\n  a\n  a\n")).unwrap();
+        assert_eq!(heard.stats.seconds, 6.0);
+        assert_eq!(heard.samples, [vec![0; 88_200], once.samples.clone(), once.samples.clone()].concat());
+        let soloed: Vec<(&str, &str)> = heard.stats.lanes.iter().map(|s| (s.pattern.as_str(), s.lane.as_str())).collect();
+        assert_eq!(soloed, [("b", "triangle"), ("a", "pulse1")], "one solo per played pattern, in the order they first play");
+        assert_eq!(once.stats.lanes.len(), 1, "an unplayed pattern isn't in the wav, so it isn't in the stats");
+    }
+
+    #[test]
+    fn transpose_moves_the_pulse_and_the_noise_stays_put() {
+        let grid = |pulse: &str, noise: &str, play: &str| format!("song \"s\" tempo 120\npattern a bars 1 grid 4\nlane pulse1\n  1: {pulse} x4\nlane noise\n  1: {noise} x4\n{play}");
+        let moved = take(&grid("C4", "C4", "play\n  a +5\n")).unwrap().samples;
+        assert_eq!(moved, take(&grid("F4", "C4", "")).unwrap().samples);
+        assert_ne!(moved, take(&grid("F4", "F4", "")).unwrap().samples);
+    }
+
+    #[test]
+    fn a_transpose_that_falls_off_the_chip_is_refused_at_the_note() {
+        let off = refusal("song \"s\" tempo 120\npattern bass bars 1 grid 4\nlane triangle\n  1: C1 x4\nplay\n  bass\n  bass -1\n");
+        assert_eq!((off.code, off.pattern.as_deref(), off.lane.as_deref(), off.at, off.line), ("transposed-out-of-range", Some("bass"), Some("triangle"), Some(pos(1, 1)), Some(4)));
+        assert_eq!(off.to_string(), "line 4, pattern bass, lane triangle, at 1.1: C1 transposed -1 (play line 7) lands on B0, out of range; this lane plays C1 through B6");
+        assert!(take("song \"s\" tempo 120\npattern bass bars 1 grid 4\nlane triangle\n  1: B0 x4\nplay\n  bass +1\n").is_ok(), "the pitch that plays is the one the card judges");
+    }
+
+    #[test]
+    fn an_unplayed_pattern_still_answers_to_the_card() {
+        let ghost = refusal(&format!("{DUO}pattern ghost bars 1 grid 4\nlane pulse1 duty 25\n  1: C9 x1\nplay\n  a\n"));
+        assert_eq!((ghost.code, ghost.pattern.as_deref(), ghost.lane.as_deref(), ghost.at, ghost.line), ("out-of-range", Some("ghost"), Some("pulse1"), Some(pos(1, 1)), Some(10)));
+        assert_eq!(ghost.to_string(), "line 10, pattern ghost, lane pulse1, at 1.1: C9 is out of range; this lane plays C2 through B7");
+        let knob = refusal(&format!("{DUO}pattern ghost bars 1 grid 4\nlane triangle vol 8\nplay\n  a\n"));
+        assert_eq!((knob.code, knob.lane.as_deref(), knob.at, knob.line), ("no-volume-knob", Some("triangle"), None, Some(9)));
+    }
+
+    #[test]
+    fn notes_never_carry_across_into_the_next_pattern() {
+        let crossing = refusal("song \"s\" tempo 120\npattern a bars 1 grid 4\nlane pulse1\n  3: C4 x4\npattern b bars 1 grid 4\nplay\n  a\n  b\n");
+        assert_eq!((crossing.code, crossing.pattern.as_deref(), crossing.line), ("runs-past-end", Some("a"), Some(4)));
+    }
+
+    #[test]
+    fn the_cap_counts_the_play_list_repeats_and_all() {
+        let song = |plays: usize| Song::parse(&format!("song \"s\" tempo 120\npattern a bars 100 grid 4\nplay\n{}", "  a\n".repeat(plays))).unwrap();
+        assert_eq!(overlong(&song(3)), None);
+        assert_eq!(overlong(&song(4)).expect("800 seconds is past the cap").message, "the song runs 800.0 seconds (400 bars at tempo 120), past the 10 minute cap");
+        let shelved = take("song \"s\" tempo 120\npattern endless bars 4000000000 grid 255\nlane pulse1\n  1.1: C4 x1\npattern ding bars 1 grid 4\nplay\n  ding\n").unwrap();
+        assert_eq!(shelved.stats.seconds, 2.0, "an unplayed pattern costs nothing, however long");
     }
 
     #[test]

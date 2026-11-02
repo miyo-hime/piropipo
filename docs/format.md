@@ -53,7 +53,7 @@ a bare slot (`5:` instead of `1.5:`) means bar 1. fine for one-bar jingles; mult
 `xN` is how many slots the note rings. rules, all checked:
 
 - a length **may cross a barline**. a half note tied to a quarter is just `x12`; there is no tie syntax because a length already is one.
-- a note may **not** run past the end of its pattern. (whether a note can cross into the next pattern of the song is open, see below.)
+- a note may **not** run past the end of its pattern, and that includes ringing on into whichever pattern plays next. each pattern is a closed box.
 - two notes in the same lane may **not** overlap. a lane is one voice.
 
 ## rests
@@ -68,20 +68,40 @@ scientific pitch notation, C4 is middle C. sharps with `#` (`C#4`), flats with `
 
 the profile defines which lanes exist and what they can do. for `nes`: `pulse1`, `pulse2`, `triangle`, `noise`. parameters follow the lane name (`lane pulse1 duty 25`); which parameters a lane accepts is also the profile's call. a lane appears at most once per pattern, and lanes you don't use can be omitted.
 
+## the song order
+
+with one pattern, the file is the song. with several, a `play` block says what plays when:
+
+```
+play
+  intro
+  main
+  main
+  bridge +3
+  main
+```
+
+pattern names, top to bottom, and that's the song. the block can sit anywhere in the file (patterns declared further down are fine) and runs until the next `pattern` line. leave it out and the patterns play once each, in the order they're written.
+
+- **a repeat is the name written again.** there's no `main x2`, on purpose: `x2` already means "two slots" on a note line, and a song order is short enough that listing beats counting.
+- **`+N` / `-N` after a name transposes that play by N semitones.** only the pitched lanes move (pulses and triangle). the noise lane stays exactly as written, since its "pitches" are really timer settings and shifting them would just pick a different hiss.
+- transposed notes are checked against the profile all over again. if `bridge +3` pushes a note past the top of the pulse range, that's an error naming the note, the pattern, and the play line. nothing gets clamped.
+- a pattern the play block never names doesn't render and doesn't count toward the length cap (the cap counts every play, repeats included) - but its notes still answer to the profile. an unplayable note is an error wherever it's written; reachability doesn't launder it.
+
+there are no sections or loop markers. a wav has to end somewhere anyway, and until a real song needs more, the flat list is the whole feature.
+
 ## what `piro check` promises
 
 every error names the lane, the bar, and the slot, in the same `bar.slot` syntax you write. the checker also prints each note's computed end position, so a seam like "does the bass stop exactly where the next note starts" is checkable by eye without doing the carry yourself.
 
 "end" always means **the last slot the note rings in**, inclusive. a note at `1.9` with `x16` rings through `2.8`, and the next note may start at `2.9`. a perfect seam is end + 1 = next start, never end = next start.
 
-two more facts the parser commits to, so they're spec now: notes within a lane may be written in any order (the checker sorts; position is truth, line order is convenience), and pattern names are unique per file (the future song order will reference them by name).
+two more facts the parser commits to, so they're spec now: notes within a lane may be written in any order (the checker sorts; position is truth, line order is convenience), and pattern names are unique per file (the play block references them by name).
 
 ## open questions
 
 - **the `x` sigil.** `x2` reads as "play twice" to anyone with tracker habits. it might need to be a different character, or nothing at all.
-- **song structure.** patterns need an order, repeats, and probably sections and transpose, in the format itself. a format without them gets script generators written on top of it, which defeats the point of having a checkable format. shape not designed yet.
 - **effects and ornaments.** vibrato, arpeggio, slides, duty changes mid-note: deliberately absent from v0. they're half the chip sound, so they're coming, but they're a design of their own.
 - **the noise lane.** noise "pitch" is one of 16 timer settings, not a note. probably its own small notation, defined by the profile.
-- **notes crossing pattern boundaries** in the song order: error, clip, or legal tie? currently unspecified, which means error until decided.
 - **retrigger.** two back-to-back notes of the same pitch: does the envelope restart? (it should, but the engine has to actually do it.)
 - **strict mode.** an opt-in check that every slot in every bar is accounted for, notes or written rests, no silent gaps. probably a flag on `piro check`.

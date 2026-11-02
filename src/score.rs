@@ -31,7 +31,10 @@ pub struct Lane { pub name: String, pub params: Vec<(String, String)>, pub notes
 pub struct Pattern { pub name: String, pub bars: u32, pub grid: u32, pub lanes: Vec<Lane>, pub line: usize }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Song { pub title: String, pub tempo: u32, pub profile: Option<String>, pub patterns: Vec<Pattern> }
+pub struct Cue { pub pattern: String, pub shift: i8, pub line: usize }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Song { pub title: String, pub tempo: u32, pub profile: Option<String>, pub patterns: Vec<Pattern>, pub setlist: Vec<Cue> }
 
 impl Song {
     pub fn parse(text: &str) -> Result<Song, Vec<ScoreError>> {
@@ -39,6 +42,8 @@ impl Song {
         for (i, raw) in text.lines().enumerate() { copyist.read(i + 1, raw); }
         copyist.finish()
     }
+
+    pub fn pattern(&self, name: &str) -> Option<&Pattern> { self.patterns.iter().find(|p| p.name == name) }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +93,13 @@ pub enum Fault {
     SlotPastGrid { slot: u32, grid: u32, meant: Option<Position> },
     RunsPastEnd { through: Position, last: Position, over: u64 },
     Overlap { with: Position, line: usize, through: Position },
+    SecondPlay { first: usize },
+    CrowdedPlay(String),
+    EmptyPlay,
+    BadShift(String),
+    FarShift(String),
+    CueLeftover(String),
+    UnknownCue { name: String, known: Vec<String> },
 }
 
 impl Fault {
@@ -122,6 +134,13 @@ impl Fault {
             Fault::SlotPastGrid { .. } => "slot-past-grid",
             Fault::RunsPastEnd { .. } => "runs-past-end",
             Fault::Overlap { .. } => "overlap",
+            Fault::SecondPlay { .. } => "second-play",
+            Fault::CrowdedPlay(_) => "crowded-play",
+            Fault::EmptyPlay => "empty-play",
+            Fault::BadShift(_) => "bad-transpose",
+            Fault::FarShift(_) => "transpose-too-far",
+            Fault::CueLeftover(_) => "leftover",
+            Fault::UnknownCue { .. } => "unknown-pattern",
         }
     }
 }
@@ -130,7 +149,7 @@ impl fmt::Display for Fault {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let s = |n: u64| if n == 1 { "" } else { "s" };
         match self {
-            Fault::Unreadable(text) => write!(f, "can't read `{text}`; a line is a `song`, `pattern`, or `lane` directive, or a note like `1.5: C4 x2`"),
+            Fault::Unreadable(text) => write!(f, "can't read `{text}`; a line is a `song`, `pattern`, `lane`, or `play` directive, or a note like `1.5: C4 x2`"),
             Fault::NoSong => write!(f, "no `song` line; every file declares one, like `song \"first light\" tempo 112`"),
             Fault::SecondSong { first } => write!(f, "a second `song` line; the song was already declared on line {first}"),
             Fault::NoTitle => write!(f, "the song needs a quoted title right after `song`, like `song \"first light\"`"),
@@ -162,6 +181,14 @@ impl fmt::Display for Fault {
             }
             Fault::RunsPastEnd { through, last, over } => write!(f, "rings through {through}, {over} slot{} past the pattern's last slot {last}", s(*over)),
             Fault::Overlap { with, line, through } => write!(f, "overlaps the note at {with} (line {line}), which rings through {through}; a lane plays one note at a time"),
+            Fault::SecondPlay { first } => write!(f, "a second `play` block; the song order already started on line {first}, and one block lists the whole song"),
+            Fault::CrowdedPlay(text) => write!(f, "`play` stands alone on its line, so `{text}` has nowhere to go; list the patterns under it, one per line"),
+            Fault::EmptyPlay => write!(f, "the `play` block lists no patterns; name them under it, one per line, in the order they play"),
+            Fault::BadShift(word) => write!(f, "`{word}` isn't a transpose; after the pattern name a play line takes only `+N` or `-N` semitones, and a repeat is the name written again on its own line"),
+            Fault::FarShift(word) => write!(f, "`{word}` semitones is further than any chip reaches; keep a transpose between -127 and +127"),
+            Fault::CueLeftover(text) => write!(f, "unexpected `{text}` after the transpose; a play line is just a pattern name and an optional `+N` or `-N`"),
+            Fault::UnknownCue { name, known: none } if none.is_empty() => write!(f, "no pattern is named `{name}`; this file declares no patterns to play"),
+            Fault::UnknownCue { name, known } => write!(f, "no pattern is named `{name}`; the patterns are {}", known.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ")),
         }
     }
 }
@@ -178,7 +205,7 @@ struct Head { line: usize, title: String, tempo: u32, profile: Option<String> }
 struct Sheet { pattern: Pattern, sound: bool }
 
 #[derive(Default)]
-struct Copyist { head: Option<Head>, sheets: Vec<Sheet>, pen: Pen, pattern: Option<String>, lane: Option<String>, errors: Vec<ScoreError> }
+struct Copyist { head: Option<Head>, sheets: Vec<Sheet>, setlist: Option<(usize, Vec<Cue>)>, cueing: bool, pen: Pen, pattern: Option<String>, lane: Option<String>, errors: Vec<ScoreError> }
 
 impl Copyist {
     fn blame(&mut self, line: usize, at: Option<Position>, fault: Fault) {
@@ -197,6 +224,8 @@ impl Copyist {
             "song" => self.song(line, rest),
             "pattern" => self.pattern(line, rest),
             "lane" => self.lane(line, rest),
+            "play" => self.play(line, rest),
+            _ if self.cueing && matches!(self.pen, Pen::Lifted) => self.cue(line, text),
             _ if text.contains(':') || first.starts_with(|c: char| c.is_ascii_digit()) => self.note(line, text),
             _ => self.blame(line, None, Fault::Unreadable(text.into())),
         }
@@ -228,6 +257,7 @@ impl Copyist {
         self.pattern = (!name.is_empty()).then(|| name.to_owned());
         self.lane = None;
         self.pen = Pen::Lifted;
+        self.cueing = false;
         let mut faults = Vec::new();
         if name.is_empty() { faults.push(Fault::NoName("pattern")); }
         else if let Some(twin) = self.sheets.iter().find(|s| s.pattern.name == name) { faults.push(Fault::SecondPattern { first: twin.pattern.line }); }
@@ -244,7 +274,7 @@ impl Copyist {
         self.lane = tokens.first().map(|n| (*n).to_owned());
         self.pen = Pen::Dry;
         let Some((name, rest)) = tokens.split_first() else { return self.blame(line, None, Fault::NoName("lane")) };
-        let Some(sheet) = self.sheets.last() else { return self.blame(line, None, Fault::LaneOutsidePattern) };
+        let Some(sheet) = self.sheets.last().filter(|_| !self.cueing) else { return self.blame(line, None, Fault::LaneOutsidePattern) };
         if let Some(twin) = sheet.pattern.lanes.iter().find(|l| l.name == *name) { let first = twin.line; return self.blame(line, None, Fault::SecondLane { first }); }
         let mut params = Vec::new();
         for pair in rest.chunks(2) {
@@ -255,6 +285,26 @@ impl Copyist {
         }
         if let Some(sheet) = self.sheets.last_mut() { sheet.pattern.lanes.push(Lane { name: (*name).into(), params, notes: Vec::new(), line }); }
         self.pen = Pen::Writing;
+    }
+
+    fn play(&mut self, line: usize, rest: &str) {
+        self.pattern = None;
+        self.lane = None;
+        self.pen = Pen::Lifted;
+        self.cueing = true;
+        if let Some(&(first, _)) = self.setlist.as_ref() { self.blame(line, None, Fault::SecondPlay { first }); } else { self.setlist = Some((line, Vec::new())); }
+        if !rest.is_empty() { self.blame(line, None, Fault::CrowdedPlay(rest.into())); }
+    }
+
+    fn cue(&mut self, line: usize, text: &str) {
+        let mut words = text.split_whitespace();
+        let Some(name) = words.next() else { return };
+        let mut faults = Vec::new();
+        let shift = words.next().map_or(0, |word| read_shift(word).unwrap_or_else(|fault| { faults.push(fault); 0 }));
+        let leftover: Vec<&str> = words.collect();
+        if !leftover.is_empty() { faults.push(Fault::CueLeftover(leftover.join(" "))); }
+        for fault in faults { self.blame(line, None, fault); }
+        if let Some((_, cues)) = self.setlist.as_mut() { cues.push(Cue { pattern: name.into(), shift, line }); }
     }
 
     fn note(&mut self, line: usize, text: &str) {
@@ -291,10 +341,19 @@ impl Copyist {
 
     fn finish(mut self) -> Result<Song, Vec<ScoreError>> {
         for sheet in self.sheets.iter().filter(|s| s.sound) { lint(&sheet.pattern, &mut self.errors); }
+        let setlist = match self.setlist.take() {
+            Some((line, cues)) => {
+                if cues.is_empty() { self.blame_song(line, Fault::EmptyPlay); }
+                let known: Vec<String> = self.sheets.iter().map(|s| s.pattern.name.clone()).filter(|n| !n.is_empty()).collect();
+                for cue in cues.iter().filter(|c| !known.contains(&c.pattern)) { self.blame_song(cue.line, Fault::UnknownCue { name: cue.pattern.clone(), known: known.clone() }); }
+                cues
+            }
+            None => self.sheets.iter().map(|s| Cue { pattern: s.pattern.name.clone(), shift: 0, line: s.pattern.line }).collect(),
+        };
         if self.head.is_none() { self.errors.push(ScoreError { line: None, pattern: None, lane: None, at: None, fault: Fault::NoSong }); }
         self.errors.sort_by_key(|e| e.line);
         match self.head {
-            Some(head) if self.errors.is_empty() => Ok(Song { title: head.title, tempo: head.tempo, profile: head.profile, patterns: self.sheets.into_iter().map(|s| s.pattern).collect() }),
+            Some(head) if self.errors.is_empty() => Ok(Song { title: head.title, tempo: head.tempo, profile: head.profile, patterns: self.sheets.into_iter().map(|s| s.pattern).collect(), setlist }),
             _ => Err(self.errors),
         }
     }
@@ -369,6 +428,12 @@ fn read_position(spot: &str) -> Option<Position> {
 }
 
 fn read_length(word: &str) -> Option<u32> { word.strip_prefix('x').and_then(whole) }
+
+fn read_shift(word: &str) -> Result<i8, Fault> {
+    let steps = word.strip_prefix('+').or_else(|| word.strip_prefix('-')).and_then(whole).ok_or_else(|| Fault::BadShift(word.into()))?;
+    let steps = i8::try_from(steps).map_err(|_| Fault::FarShift(word.into()))?;
+    Ok(if word.starts_with('-') { -steps } else { steps })
+}
 
 fn read_pitch(word: &str) -> Option<u8> {
     let mut chars = word.chars();
@@ -551,5 +616,59 @@ mod tests {
     #[test]
     fn a_forgotten_pitch_is_named_as_such() {
         assert_eq!(faults(&format!("{TWO_BARS}  1.1: x4\n")), [Fault::NoPitch]);
+    }
+
+    const PAIR: &str = "song \"t\" tempo 120\npattern intro bars 1 grid 4\nlane pulse1\n  1: C4 x4\npattern main bars 1 grid 4\nlane triangle\n  1: E2 x4\n";
+
+    fn cues(song: &Song) -> Vec<(&str, i8, usize)> { song.setlist.iter().map(|c| (c.pattern.as_str(), c.shift, c.line)).collect() }
+
+    #[test]
+    fn the_play_block_is_the_running_order_repeats_and_all() {
+        let song = Song::parse(&format!("{PAIR}play\n  intro\n  main\n  main\n  intro +3\n  main -12\n")).unwrap();
+        assert_eq!(cues(&song), [("intro", 0, 9), ("main", 0, 10), ("main", 0, 11), ("intro", 3, 12), ("main", -12, 13)]);
+        assert_eq!(song.patterns.len(), 2, "a repeat is a second cue, never a second pattern");
+    }
+
+    #[test]
+    fn no_play_block_means_file_order() {
+        assert_eq!(cues(&Song::parse(PAIR).unwrap()), [("intro", 0, 2), ("main", 0, 5)]);
+    }
+
+    #[test]
+    fn the_play_block_can_open_the_file_and_name_patterns_written_later() {
+        let song = Song::parse("song \"t\" tempo 120\nplay ; the order\n  b\n  a +7 ; up a fifth\npattern a bars 1 grid 4\nlane pulse1\n  1: C4 x4\npattern b bars 1 grid 4\n").unwrap();
+        assert_eq!(cues(&song), [("b", 0, 3), ("a", 7, 4)]);
+        assert_eq!(song.patterns[0].lanes[0].notes.len(), 1);
+    }
+
+    #[test]
+    fn count_sugar_is_refused_with_the_way_to_repeat() {
+        let errors = Song::parse(&format!("{PAIR}play\n  main x2\n")).unwrap_err();
+        assert_eq!((errors.len(), errors[0].line, &errors[0].fault), (1, Some(9), &Fault::BadShift("x2".into())));
+        assert_eq!(errors[0].to_string(), "line 9: `x2` isn't a transpose; after the pattern name a play line takes only `+N` or `-N` semitones, and a repeat is the name written again on its own line");
+    }
+
+    #[test]
+    fn play_lines_are_checked() {
+        assert_eq!(faults(&format!("{PAIR}play\n  intro +\n  main +3 again\n  mian\n  outro +128\nplay\n")), [
+            Fault::BadShift("+".into()),
+            Fault::CueLeftover("again".into()),
+            Fault::UnknownCue { name: "mian".into(), known: vec!["intro".into(), "main".into()] },
+            Fault::FarShift("+128".into()),
+            Fault::UnknownCue { name: "outro".into(), known: vec!["intro".into(), "main".into()] },
+            Fault::SecondPlay { first: 8 },
+        ]);
+        assert_eq!(faults(&format!("{PAIR}play\n")), [Fault::EmptyPlay]);
+        assert_eq!(faults(&format!("{PAIR}play intro main\n  intro\n")), [Fault::CrowdedPlay("intro main".into())]);
+        assert_eq!(faults(&format!("{PAIR}play\n  main\nlane pulse2\n  1: C4 x4\n")), [Fault::LaneOutsidePattern]);
+        let lonely = Song::parse("song \"t\" tempo 90\nplay\n  main\n").unwrap_err();
+        assert_eq!(lonely[0].to_string(), "line 3: no pattern is named `main`; this file declares no patterns to play");
+    }
+
+    #[test]
+    fn transposes_are_signed_semitones_within_reach() {
+        for (word, steps) in [("+3", 3), ("-12", -12), ("+0", 0), ("-0", 0), ("+127", 127), ("-127", -127)] { assert_eq!(read_shift(word), Ok(steps), "{word}"); }
+        for junk in ["3", "x2", "+", "+-3", "++3", "+3.5", "-x"] { assert_eq!(read_shift(junk), Err(Fault::BadShift(junk.into())), "{junk:?} should not read"); }
+        assert_eq!(read_shift("-128"), Err(Fault::FarShift("-128".into())));
     }
 }

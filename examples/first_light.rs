@@ -8,8 +8,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = "/tmp/first-light.wav";
     let spec = hound::WavSpec { channels: 1, sample_rate: u32::from(render::SAMPLE_RATE), bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
     let mut wav = hound::WavWriter::create(path, spec)?;
-    for pattern in &song.patterns {
-        for s in render::pattern(&song, pattern)? { wav.write_sample(s)?; }
+    for cue in &song.setlist {
+        let pattern = song.pattern(&cue.pattern).ok_or("the setlist names a pattern the song doesn't have")?;
+        let moved = render::transposed(&song, pattern, cue)?;
+        for s in render::pattern(&song, &moved)? { wav.write_sample(s)?; }
     }
     let seconds = f64::from(wav.duration()) / f64::from(render::SAMPLE_RATE);
     wav.finalize()?;

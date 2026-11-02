@@ -1,5 +1,6 @@
-use crate::profile::{self, Breach, Part, Voice};
-use crate::score::{Note, Pattern, Position, Song};
+use crate::profile::{self, Breach, Part, Voice, named};
+use crate::score::{Cue, Note, Pattern, Position, Song};
+use std::borrow::Cow;
 use std::fmt;
 
 pub const SAMPLE_RATE: u16 = 44100;
@@ -41,6 +42,7 @@ pub enum RenderError {
     Volume { lane: String, key: String },
     Duty { lane: String, value: String },
     Range { lane: String, at: Position, pitch: u8, playable: &'static str },
+    Shifted { lane: String, at: Position, pitch: u8, shift: i8, cue: usize, playable: &'static str },
     Misfit { lane: String, at: Position },
     Mml(String),
 }
@@ -56,6 +58,7 @@ impl fmt::Display for RenderError {
             RenderError::Volume { lane, key } => write!(f, "lane {lane}: {}", Breach::Volume(key.clone())),
             RenderError::Duty { lane, value } => write!(f, "lane {lane}: {}", Breach::Duty(value.clone())),
             RenderError::Range { lane, at, pitch, playable } => write!(f, "lane {lane}, at {at}: {}", Breach::Range { at: *at, pitch: *pitch, playable }),
+            RenderError::Shifted { lane, at, pitch, shift, cue, playable } => write!(f, "lane {lane}, at {at}: {} transposed {shift:+} (play line {cue}) lands on {}, out of range; this lane plays {playable}", named(*pitch), named(i16::from(*pitch) + i16::from(*shift))),
             RenderError::Misfit { lane, at } => write!(f, "lane {lane}, at {at}: this note doesn't fit the pattern (an overlap, a zero length, or a spot outside it); the parser's checks would have refused it"),
             RenderError::Mml(why) => write!(f, "ffmml refused the compiled score, which is a renderer bug:\n{why}"),
         }
@@ -77,6 +80,22 @@ fn charged(lane: &str, breach: Breach) -> RenderError {
 }
 
 pub fn pattern(song: &Song, pattern: &Pattern) -> Result<Vec<i16>, RenderError> { perform(&transcribe(song, pattern)?) }
+
+pub fn transposed<'p>(song: &Song, pattern: &'p Pattern, cue: &Cue) -> Result<Cow<'p, Pattern>, RenderError> {
+    if cue.shift == 0 { return Ok(Cow::Borrowed(pattern)); }
+    let card = profile::card(song.profile.as_deref()).map_err(|breach| charged("", breach))?;
+    let mut moved = pattern.clone();
+    for lane in &mut moved.lanes {
+        let Ok(part) = card.part(&lane.name) else { continue };
+        if part.voice == Voice::Noise { continue; }
+        for note in &mut lane.notes {
+            let Some(pitch) = note.pitch else { continue };
+            let landed = u8::try_from(i16::from(pitch) + i16::from(cue.shift)).ok().filter(|p| (part.low..=part.high).contains(p));
+            note.pitch = Some(landed.ok_or_else(|| RenderError::Shifted { lane: lane.name.clone(), at: note.at, pitch, shift: cue.shift, cue: cue.line, playable: part.playable })?);
+        }
+    }
+    Ok(Cow::Owned(moved))
+}
 
 fn transcribe(song: &Song, pattern: &Pattern) -> Result<String, RenderError> {
     let card = profile::card(song.profile.as_deref()).map_err(|breach| charged("", breach))?;
@@ -283,6 +302,29 @@ mod tests {
         assert_eq!(pattern(&under, &under.patterns[0]).unwrap_err().to_string(), "lane pulse1, at 1.1: G#1 is out of range; this lane plays A1 through G#8");
         let over = free("triangle", "A7");
         assert!(matches!(pattern(&over, &over.patterns[0]), Err(RenderError::Range { pitch: 105, playable: "A0 through G#7", .. })));
+    }
+
+    fn cue(shift: i8) -> Cue { Cue { pattern: "p".into(), shift, line: 12 } }
+
+    #[test]
+    fn transpose_moves_the_pitched_lanes_and_leaves_the_noise_alone() {
+        let trio = song("song \"s\" tempo 120\npattern p bars 1 grid 4\nlane pulse1\n  1: C4 x2\n  3: - x2\nlane triangle\n  1: E2 x4\nlane noise\n  1: C4 x1\n");
+        let pitches = |shift| transposed(&trio, &trio.patterns[0], &cue(shift)).unwrap().lanes.iter().map(|l| l.notes.iter().map(|n| n.pitch).collect::<Vec<_>>()).collect::<Vec<_>>();
+        assert_eq!(pitches(3), [vec![Some(63), None], vec![Some(43)], vec![Some(60)]]);
+        assert_eq!(pitches(-12), [vec![Some(48), None], vec![Some(28)], vec![Some(60)]]);
+        assert!(matches!(transposed(&trio, &trio.patterns[0], &cue(0)), Ok(Cow::Borrowed(_))));
+        let noise = song("song \"s\" tempo 120\npattern p bars 1 grid 4\nlane noise\n  1: B9 x1\n");
+        assert_eq!(transposed(&noise, &noise.patterns[0], &cue(127)).unwrap().lanes[0].notes[0].pitch, Some(131));
+    }
+
+    #[test]
+    fn a_transpose_off_the_chip_is_refused_with_both_pitches_named() {
+        let song = song("song \"s\" tempo 120\npattern p bars 1 grid 4\nlane pulse1\n  1: C4 x1\n  2: A#7 x1\n");
+        let refused = transposed(&song, &song.patterns[0], &cue(3)).unwrap_err();
+        assert_eq!(refused, RenderError::Shifted { lane: "pulse1".into(), at: Position { bar: 1, slot: 2 }, pitch: 106, shift: 3, cue: 12, playable: "C2 through B7" });
+        assert_eq!(refused.to_string(), "lane pulse1, at 1.2: A#7 transposed +3 (play line 12) lands on C#8, out of range; this lane plays C2 through B7");
+        assert_eq!(transposed(&song, &song.patterns[0], &cue(-127)).unwrap_err().to_string(), "lane pulse1, at 1.1: C4 transposed -127 (play line 12) lands on F-7, out of range; this lane plays C2 through B7");
+        assert!(transposed(&song, &song.patterns[0], &cue(1)).is_ok(), "A#7 up one is B7, the top of the pulse");
     }
 
     #[test]

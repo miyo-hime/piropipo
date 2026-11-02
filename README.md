@@ -39,4 +39,4 @@ one binary, `piro`. rust because the alternative was python and i'd rather not.
 
 ## status
 
-young. the grid, the four verbs and the nes profile work and are tested; song structure (pattern order, repeats) and effects (vibrato, arpeggio, slides) are designed but not in yet. the notation isn't frozen until those land, so expect some breaking changes.
+young. the grid, the four verbs, the nes profile and song structure (a `play` block for pattern order, repeats and transpose) work and are tested; effects (vibrato, arpeggio, slides) are designed but not in yet. the notation isn't frozen until they land, so expect some breaking changes.
