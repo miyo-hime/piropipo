@@ -1,6 +1,7 @@
 use clap::Parser;
 
 mod check;
+mod harmony;
 mod listen;
 mod roll;
 mod sfx;
@@ -23,7 +24,7 @@ enum Verb {
     Track(track::Args),
     #[command(about = "render sound-effect params to wav")]
     Sfx(sfx::Args),
-    #[command(about = "lint a grid and report render stats, no wav")]
+    #[command(about = "lint a grid, report render stats and a harmony advisory, no wav")]
     Check(check::Args),
     #[command(about = "draw a grid as a piano-roll png")]
     Roll(roll::Args),
