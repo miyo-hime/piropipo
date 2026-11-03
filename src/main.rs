@@ -5,6 +5,7 @@ mod harmony;
 mod listen;
 mod roll;
 mod sfx;
+mod sketch;
 mod surface;
 mod track;
 mod vu;
@@ -28,6 +29,8 @@ enum Verb {
     Check(check::Args),
     #[command(about = "draw a grid as a piano-roll png")]
     Roll(roll::Args),
+    #[command(about = "place a sketch's flowing lane notes and write the positioned .piro grid")]
+    Sketch(sketch::Args),
 }
 
 fn main() {
@@ -39,6 +42,7 @@ fn main() {
         Verb::Sfx(args) => sfx::run(args, cli.human),
         Verb::Check(args) => check::run(args, cli.human),
         Verb::Roll(args) => roll::run(args, cli.human),
+        Verb::Sketch(args) => sketch::run(args, cli.human),
     };
     if let Err(e) = played { eprintln!("piro: {e}"); std::process::exit(1); }
 }
