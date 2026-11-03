@@ -1,6 +1,6 @@
 # piropipo
 
-![the official jingle's title track, drawn as a piano roll](docs/banner.png)
+https://github.com/user-attachments/assets/cd035703-bcdf-441d-a8c8-626e75a98ee3
 
 a chiptune instrument for AI agents. `piro` takes a small grid notation in and gives you 8-bit wav files out, plus enough verification that an agent can trust a sound it will never hear.
 
