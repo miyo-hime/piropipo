@@ -1,11 +1,10 @@
 use piropipo::{render, score::Song};
 
-const SPEC: &str = include_str!("../skills/piropipo/references/format.md");
+const JINGLE: &str = include_str!("../docs/honey-in-the-wine.piro");
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let score = SPEC.split_once("```\n").and_then(|(_, opened)| opened.split_once("```")).ok_or("format.md lost its example")?.0;
-    let song = Song::parse(score).map_err(|errors| errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))?;
-    let path = "/tmp/first-light.wav";
+    let song = Song::parse(JINGLE).map_err(|errors| errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))?;
+    let path = "/tmp/jingle.wav";
     let spec = hound::WavSpec { channels: 1, sample_rate: u32::from(render::SAMPLE_RATE), bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
     let mut wav = hound::WavWriter::create(path, spec)?;
     for cue in &song.setlist {

@@ -1,6 +1,6 @@
 # piropipo
 
-![a two-bar tune drawn as a piano roll](docs/first-light.png)
+![the official jingle's title track, drawn as a piano roll](docs/banner.png)
 
 a chiptune instrument for AI agents. `piro` takes a small grid notation in and gives you 8-bit wav files out, plus enough verification that an agent can trust a sound it will never hear.
 
@@ -18,7 +18,7 @@ the other half of the trick is constraint profiles. the default `nes` card only 
 piro track song.piro     # grid in, wav out, beside the input
 piro sfx coin            # a game sound from a preset; real units to tweak it
 piro check song.piro     # lint + render stats, writes nothing
-piro roll song.piro      # the piano-roll png up top
+piro roll song.piro      # a piano-roll png (the jingle's is at the bottom)
 ```
 
 everything answers in json on stdout, because the main user is a program. `--human` gets you sentences instead.
@@ -41,4 +41,23 @@ then hand it to the musician: grab the skill at [skills/piropipo](skills/piropip
 
 ## status
 
-young but whole: the grid, the four verbs, the nes profiles, song structure (`play` blocks with pattern order, repeats and transpose), and all six effects work and are tested. the notation should be mostly stable now, though i reserve the right to break it while the version starts with 0.
+the NES is done: the grid, the four verbs, song structure (`play` blocks with pattern order, repeats and transpose), all six effects (fades ride arpeggios and slides now), a `--strict` check that refuses silence nobody wrote down, and an official jingle. the notation should be mostly stable now, though i reserve the right to break it while the version starts with 0.
+
+a profile is just a card, and the NES happens to be the first one. other chips may get their profiles when i'm not lazy.
+
+## the jingle
+
+piropipo has an official theme, composed on piropipo by an agent that never heard it: [docs/honey-in-the-wine.piro](docs/honey-in-the-wine.piro). it doubles as the big worked example - six patterns, a key change of heart, and every effect the format knows. render it yourself:
+
+```
+piro track docs/honey-in-the-wine.piro
+```
+
+or read it the way the composer did:
+
+<details>
+<summary>unfold the full six-pattern roll</summary>
+
+![the jingle, all six patterns drawn as a piano roll](docs/honey-in-the-wine.png)
+
+</details>
