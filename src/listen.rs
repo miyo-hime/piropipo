@@ -1,12 +1,17 @@
 use crate::surface;
+use crate::vu::{self, Reading};
 use piropipo::profile::{self, Breach, Charge};
 use piropipo::render::{self, RenderError, SAMPLE_RATE, Stencils};
 use piropipo::score::{Bend, Cue, Lane, Note, Pattern, Position, ScoreError, Song};
 use serde_json::{Value, json};
 use std::fmt;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 const CAP_SECONDS: u64 = 600;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detail { Headline, Deposition, Everything }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Remark { pub code: &'static str, pub message: String, pub pattern: Option<String>, pub lane: Option<String>, pub at: Option<Position>, pub line: Option<usize> }
@@ -86,15 +91,20 @@ impl Solo {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Stats { pub seconds: f64, pub peak_dbfs: Option<f64>, pub saturated: usize, pub lanes: Vec<Solo> }
+pub struct Stats { pub seconds: f64, pub peak_dbfs: Option<f64>, pub saturated: usize, pub lanes: Vec<Solo>, pub gauges: Option<Reading> }
 
 impl Stats {
+    fn headline(&self) -> Value { json!({ "duration_seconds": self.seconds, "peak_dbfs": self.peak_dbfs, "saturated_samples": self.saturated }) }
+
     fn json(&self) -> Value {
-        json!({ "duration_seconds": self.seconds, "peak_dbfs": self.peak_dbfs, "saturated_samples": self.saturated, "lanes": self.lanes.iter().map(Solo::json).collect::<Vec<_>>() })
+        let mut stats = self.headline();
+        if let (Some(fields), Some(Value::Object(gauged))) = (stats.as_object_mut(), self.gauges.as_ref().map(Reading::json)) { fields.extend(gauged); }
+        stats["lanes"] = self.lanes.iter().map(Solo::json).collect();
+        stats
     }
 }
 
-pub struct Take { pub samples: Vec<i16>, pub stats: Stats, pub warnings: Vec<Remark> }
+pub struct Take { pub samples: Vec<i16>, pub stats: Stats, pub warnings: Vec<Remark>, pub song: Song, pub plays: Vec<Range<usize>> }
 
 pub fn read(input: &str) -> Result<String, Vec<Remark>> {
     surface::read_source(input).map(|(text, _)| text).map_err(|e| vec![Remark::loose("unreadable-input", format!("can't read {input}: {e}"))])
@@ -104,11 +114,14 @@ pub fn take(text: &str) -> Result<Take, Vec<Remark>> {
     let song = Song::parse(text).map_err(|errors| errors.into_iter().map(Remark::from).collect::<Vec<_>>())?;
     if let Some(remark) = overlong(&song) { return Err(vec![remark]); }
     let mut samples = Vec::new();
+    let mut plays = Vec::new();
     let mut lanes = Vec::new();
     let mut stencils = Stencils::default();
     for (i, cue) in song.setlist.iter().enumerate() {
         let pattern = song.pattern(&cue.pattern).expect("the copyist refuses a play line that names no pattern");
+        let from = samples.len();
         samples.extend(render::transposed(&song, pattern, cue).and_then(|moved| render::pattern_with(&song, &moved, &mut stencils)).map_err(|e| vec![misheard(e, pattern)])?);
+        plays.push(from..samples.len());
         if song.setlist.iter().take(i).any(|c| c.pattern == cue.pattern) { continue; }
         let mut shifts: Vec<i8> = song.setlist.iter().filter(|c| c.pattern == cue.pattern).map(|c| c.shift).collect();
         shifts.sort_unstable();
@@ -117,17 +130,19 @@ pub fn take(text: &str) -> Result<Take, Vec<Remark>> {
     }
     let haunted = ghosts(&song);
     if !haunted.is_empty() { return Err(haunted); }
-    let stats = Stats { seconds: round(samples.len() as f64 / f64::from(SAMPLE_RATE), 3), peak_dbfs: peak_dbfs(&samples), saturated: saturated(&samples), lanes };
+    let stats = Stats { seconds: round(samples.len() as f64 / f64::from(SAMPLE_RATE), 3), peak_dbfs: peak_dbfs(&samples), saturated: saturated(&samples), lanes, gauges: None };
     let mut warnings: Vec<Remark> = stats.lanes.iter().filter_map(hush).collect();
     if stats.saturated > 0 { warnings.push(Remark::loose("saturation", format!("{} sample{} sit at full scale; the mix is hitting the rail and may be clipping", stats.saturated, if stats.saturated == 1 { "" } else { "s" }))); }
-    Ok(Take { samples, stats, warnings })
+    Ok(Take { samples, stats, warnings, song, plays })
 }
 
-pub fn answer(verb: &str, human: bool, played: Result<(Option<PathBuf>, Take), Vec<Remark>>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn answer(verb: &str, human: bool, detail: Detail, played: Result<(Option<PathBuf>, Take), Vec<Remark>>) -> Result<(), Box<dyn std::error::Error>> {
     match played {
-        Ok((output, take)) => {
-            let envelope = json!({ "ok": true, "verb": verb, "output": output.as_ref().map(|p| p.display().to_string()), "stats": take.stats.json(), "warnings": take.warnings.iter().map(Remark::json).collect::<Vec<_>>(), "errors": [] });
-            surface::emit(human, envelope, &tell(output.as_deref(), &take.stats, &take.warnings));
+        Ok((output, mut take)) => {
+            if detail == Detail::Everything { take.stats.gauges = Some(vu::read(&take.song, &take.samples, &take.plays)); }
+            let stats = if detail == Detail::Headline { take.stats.headline() } else { take.stats.json() };
+            let envelope = json!({ "ok": true, "verb": verb, "output": output.as_ref().map(|p| p.display().to_string()), "stats": stats, "warnings": take.warnings.iter().map(Remark::json).collect::<Vec<_>>(), "errors": [] });
+            surface::emit(human, envelope, &tell(output.as_deref(), &take.stats, detail, &take.warnings));
             Ok(())
         }
         Err(errors) => {
@@ -140,12 +155,15 @@ pub fn answer(verb: &str, human: bool, played: Result<(Option<PathBuf>, Take), V
     }
 }
 
-fn tell(output: Option<&Path>, stats: &Stats, warnings: &[Remark]) -> String {
+fn tell(output: Option<&Path>, stats: &Stats, detail: Detail, warnings: &[Remark]) -> String {
     let head = output.map_or("checked, nothing written".to_owned(), |p| format!("wrote {}", p.display()));
     let peak = stats.peak_dbfs.map_or("silent throughout".to_owned(), |p| format!("peak {p:.2} dbfs"));
     let rail = match stats.saturated { 0 => "no samples at full scale".to_owned(), 1 => "1 sample at full scale".to_owned(), n => format!("{n} samples at full scale") };
     let mut lines = vec![format!("{head}: {:.3} seconds, {peak}, {rail}", stats.seconds)];
-    lines.extend(stats.lanes.iter().map(Solo::tell));
+    if detail != Detail::Headline {
+        lines.extend(stats.gauges.as_ref().map(Reading::tell));
+        lines.extend(stats.lanes.iter().map(Solo::tell));
+    }
     lines.extend(warnings.iter().map(|w| format!("warning: {w}")));
     lines.join("\n")
 }
@@ -218,14 +236,14 @@ fn hush(solo: &Solo) -> Option<Remark> {
     (solo.voiced() && !solo.sounding).then(|| Remark { code: "silent-lane", message: "this lane has notes but renders silent".to_owned(), pattern: Some(solo.pattern.clone()), lane: Some(solo.lane.clone()), at: None, line: Some(solo.line) })
 }
 
-fn peak_dbfs(samples: &[i16]) -> Option<f64> {
+pub fn peak_dbfs(samples: &[i16]) -> Option<f64> {
     let peak = samples.iter().map(|s| s.unsigned_abs()).max().filter(|p| *p > 0)?.min(i16::MAX.unsigned_abs());
     Some(round(20.0 * (f64::from(peak) / f64::from(i16::MAX)).log10(), 2))
 }
 
 fn saturated(samples: &[i16]) -> usize { samples.iter().filter(|s| **s == i16::MAX || **s == i16::MIN).count() }
 
-fn round(x: f64, places: i32) -> f64 { let k = 10f64.powi(places); (x * k).round() / k }
+pub fn round(x: f64, places: i32) -> f64 { let k = 10f64.powi(places); (x * k).round() / k }
 
 fn misheard(e: RenderError, pattern: &Pattern) -> Remark {
     let (code, lane, at) = match &e {
@@ -446,7 +464,7 @@ mod tests {
         let json = heard.stats.json();
         assert_eq!(json["lanes"][0]["effects"][1], json!({ "at": "1.9", "effect": "arp", "steps": 30, "steps_per_second": 60.0 }));
         assert_eq!(json["lanes"][0]["effects"][0]["swings"][1]["transpose"], 12);
-        let told = tell(None, &heard.stats, &[]);
+        let told = tell(None, &heard.stats, Detail::Deposition, &[]);
         assert!(told.contains("\n  1.1 vib: 6.667 Hz after 133 ms, swings +"), "{told}");
         assert!(told.contains("; played +12, +"), "{told}");
         assert!(told.contains("\n  1.9 arp: 30 steps, 60.0 a second"), "{told}");
@@ -486,5 +504,30 @@ mod tests {
         let blink = refusal(&format!("{DUO}pattern ghost bars 4000000000 grid 255\nlane pulse1\n  1: C4 x1 fade\nplay\n  a\n"));
         assert_eq!((blink.code, blink.pattern.as_deref(), blink.line), ("fade-too-short", Some("ghost"), Some(10)));
         assert!(take(&format!("{DUO}pattern ghost bars 4000000000 grid 255\nlane pulse1\n  1: C4 x9 fade\n  4000000000.1: A4 x60 arp 0,4,7\nplay\n  a\n")).is_ok(), "a vast unplayed pattern is vetted note by note, never walked");
+    }
+
+    #[test]
+    fn the_headline_alone_still_carries_its_warnings() {
+        let heard = take("song \"s\" tempo 120\npattern p bars 1 grid 4\nlane pulse1\n  1: C4 x4\nlane noise vol 0\n  1: C4 x4\n").unwrap();
+        let told = tell(None, &heard.stats, Detail::Headline, &heard.warnings);
+        let lines: Vec<&str> = told.lines().collect();
+        assert_eq!(lines.len(), 2, "{told}");
+        assert!(lines[0].starts_with("checked, nothing written: 2.000 seconds, peak -"), "{told}");
+        assert_eq!(lines[1], "warning: line 5, pattern p, lane noise: this lane has notes but renders silent");
+        assert_eq!(heard.stats.headline().as_object().map(|s| s.keys().cloned().collect::<Vec<_>>()), Some(vec!["duration_seconds".to_owned(), "peak_dbfs".to_owned(), "saturated_samples".to_owned()]));
+    }
+
+    #[test]
+    fn the_gauges_join_the_stats_without_moving_a_field_that_was_there() {
+        let mut heard = take(spec_example()).unwrap();
+        let before = heard.stats.json();
+        heard.stats.gauges = Some(vu::read(&heard.song, &heard.samples, &heard.plays));
+        let after = heard.stats.json();
+        let keys: Vec<&str> = after.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["duration_seconds", "peak_dbfs", "saturated_samples", "rms_dbfs", "sections", "sounding_percent", "lanes"]);
+        for (key, value) in before.as_object().unwrap() { assert_eq!(after[key], *value, "{key} changed under the gauges"); }
+        assert_eq!(after["sections"][0]["pattern"], "main");
+        let deposed = tell(None, &heard.stats, Detail::Everything, &[]);
+        assert!(deposed.contains("\nloudness by bar in dbfs, whole song rms -") && deposed.contains("\npattern main, lane pulse1 sounds: "), "{deposed}");
     }
 }

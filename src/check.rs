@@ -1,4 +1,4 @@
-use crate::listen::{self, Remark, Take};
+use crate::listen::{self, Detail, Remark, Take};
 use piropipo::score::{Lane, Pattern, Position, Song};
 use std::path::PathBuf;
 
@@ -10,9 +10,11 @@ pub struct Args {
     pub output: Option<PathBuf>,
     #[arg(long, help = "also refuse any slot no note or written rest covers")]
     pub strict: bool,
+    #[arg(long, help = "only the headline (duration, peak, saturation) plus any warnings; skips the loudness curve, lane activity, and per-lane notes")]
+    pub summary: bool,
 }
 
-pub fn run(args: Args, human: bool) -> Result<(), Box<dyn std::error::Error>> { listen::answer("check", human, rehearse(args)) }
+pub fn run(args: Args, human: bool) -> Result<(), Box<dyn std::error::Error>> { listen::answer("check", human, if args.summary { Detail::Headline } else { Detail::Everything }, rehearse(args)) }
 
 fn rehearse(args: Args) -> Result<(Option<PathBuf>, Take), Vec<Remark>> {
     if let Some(wanted) = args.output { return Err(vec![Remark::loose("check-writes-nothing", format!("check writes no file, so -o {} has nowhere to go; `piro track` writes the wav", wanted.display()))]); }
@@ -54,7 +56,7 @@ mod tests {
 
     #[test]
     fn o_is_refused_not_ignored() {
-        let Err(errors) = rehearse(Args { input: "song.piro".into(), output: Some("song.wav".into()), strict: false }) else { panic!("check -o should refuse") };
+        let Err(errors) = rehearse(Args { input: "song.piro".into(), output: Some("song.wav".into()), strict: false, summary: false }) else { panic!("check -o should refuse") };
         assert_eq!(errors.iter().map(|e| e.code).collect::<Vec<_>>(), ["check-writes-nothing"]);
     }
 

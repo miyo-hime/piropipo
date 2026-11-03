@@ -6,6 +6,7 @@ mod roll;
 mod sfx;
 mod surface;
 mod track;
+mod vu;
 
 #[derive(Parser)]
 #[command(name = "piro", version, about = "a chiptune instrument for agents")]

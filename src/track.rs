@@ -1,4 +1,4 @@
-use crate::listen::{self, Remark, Take};
+use crate::listen::{self, Detail, Remark, Take};
 use crate::surface;
 use piropipo::render::SAMPLE_RATE;
 use std::path::{Path, PathBuf};
@@ -11,7 +11,7 @@ pub struct Args {
     pub output: Option<PathBuf>,
 }
 
-pub fn run(args: Args, human: bool) -> Result<(), Box<dyn std::error::Error>> { listen::answer("track", human, press(args)) }
+pub fn run(args: Args, human: bool) -> Result<(), Box<dyn std::error::Error>> { listen::answer("track", human, Detail::Deposition, press(args)) }
 
 fn press(args: Args) -> Result<(Option<PathBuf>, Take), Vec<Remark>> {
     let origin = (args.input != "-").then(|| Path::new(&args.input));
