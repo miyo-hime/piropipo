@@ -1,14 +1,20 @@
 use crate::surface::{emit, land_beside, publish, read_source};
-use piropipo::score::{Lane, Pattern, ScoreError, Song};
+use piropipo::render::{RenderError, transposed};
+use piropipo::score::{Cue, Lane, Note, Pattern, Position, ScoreError, Song};
 use serde_json::{Value, json};
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 #[derive(clap::Args)]
 pub struct Args {
     #[arg(help = "a .piro grid, or - for stdin")]
     pub input: String,
-    #[arg(short, long, help = "where the png lands (default: beside the input)")]
+    #[arg(short, long, help = "where the png lands (default: beside the input; a crop names itself, like song.bars-17-24.png)")]
     pub output: Option<PathBuf>,
+    #[arg(long, value_name = "NAMES", help = "draw only these patterns, once each as written, like chorus,bridge")]
+    pub patterns: Option<String>,
+    #[arg(long, value_name = "SPAN", help = "draw only these bars of the song as it plays, like 17..24 (both ends included) or 17")]
+    pub bars: Option<String>,
 }
 
 type Rgb = [u8; 3];
@@ -39,14 +45,25 @@ const ROOM: usize = 10;
 const NOTE: usize = 20;
 const SEMITONE: usize = 8;
 const LIMIT: usize = 16384;
+const BILLED: usize = 4;
 
 pub fn run(args: Args, human: bool) -> Result<(), Box<dyn std::error::Error>> {
     match unroll(&args) {
-        Ok((path, song, [width, height])) => {
-            let shown = path.display().to_string();
-            let count = song.patterns.len();
-            let sentence = format!("rolled \"{}\" onto {shown}: {count} pattern{}, {width}x{height} pixels", song.title, if count == 1 { "" } else { "s" });
-            emit(human, json!({ "ok": true, "verb": "roll", "output": shown, "stats": { "png": shown, "width": width, "height": height }, "warnings": [], "errors": [] }), &sentence);
+        Ok(Rolled { target, song, size: [width, height], cut }) => {
+            let shown = target.display().to_string();
+            let mut stats = json!({ "png": shown, "width": width, "height": height });
+            let (sentence, warnings) = match cut {
+                None => {
+                    let count = song.patterns.len();
+                    (format!("rolled \"{}\" onto {shown}: {count} pattern{}, {width}x{height} pixels", song.title, if count == 1 { "" } else { "s" }), Vec::new())
+                }
+                Some(cut) => {
+                    stats["crop"] = cut.json;
+                    let asides: String = cut.warnings.iter().map(|w| format!("\nwarning: {}", w.human)).collect();
+                    (format!("rolled \"{}\" onto {shown} (crop: {}): {}, {width}x{height} pixels{asides}", song.title, cut.scope, cut.names.join(", ")), cut.warnings)
+                }
+            };
+            emit(human, json!({ "ok": true, "verb": "roll", "output": shown, "stats": stats, "warnings": warnings.iter().map(|w| &w.json).collect::<Vec<_>>(), "errors": [] }), &sentence);
             Ok(())
         }
         Err(blots) => {
@@ -56,16 +73,156 @@ pub fn run(args: Args, human: bool) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn unroll(args: &Args) -> Result<(PathBuf, Song, [usize; 2]), Vec<Blot>> {
+struct Rolled { target: PathBuf, song: Song, size: [usize; 2], cut: Option<Cut> }
+
+fn unroll(args: &Args) -> Result<Rolled, Vec<Blot>> {
+    let crop = Crop::asked(args).map_err(|b| vec![b])?;
     let origin = (args.input != "-").then(|| Path::new(&args.input));
-    let target = land_beside(origin, args.output.clone(), "png").map_err(|(code, why)| vec![blot(code, why)])?;
+    let named = args.output.clone().or_else(|| Some(origin?.with_extension(format!("{}.png", crop.as_ref()?.tag()))));
+    let target = land_beside(origin, named, "png").map_err(|(code, why)| vec![blot(code, why)])?;
     let (text, _) = read_source(&args.input).map_err(|e| vec![blot("unreadable-input", format!("can't read {}: {e}", origin.map_or("stdin".into(), |p| p.display().to_string())))])?;
     let song = Song::parse(&text).map_err(|errors| errors.iter().map(misprint).collect::<Vec<_>>())?;
-    let canvas = roll(&song).map_err(|why| vec![blot("too-large", why)])?;
+    let (sheets, cut) = match &crop { None => (whole(&song), None), Some(crop) => snip(&song, crop).map(|(sheets, cut)| (sheets, Some(cut)))? };
+    let canvas = roll(&song, &sheets, cut.as_ref().map(|c| c.scope.as_str())).map_err(|why| vec![blot("too-large", why)])?;
     let png = canvas.png().map_err(|e| vec![blot("unencodable", format!("the png encoder refused the roll: {e}"))])?;
     publish(&target, &png).map_err(|e| vec![blot("unwritable-output", format!("can't write {}: {e}", target.display()))])?;
-    Ok((target, song, [canvas.width, canvas.height]))
+    Ok(Rolled { target, song, size: [canvas.width, canvas.height], cut })
 }
+
+enum Crop { Patterns(Vec<String>), Bars(u64, u64) }
+
+impl Crop {
+    fn asked(args: &Args) -> Result<Option<Crop>, Blot> {
+        match (args.patterns.as_deref(), args.bars.as_deref()) {
+            (None, None) => Ok(None),
+            (Some(_), Some(_)) => Err(blot("two-crops", "--patterns and --bars each choose the whole crop, so pick one: --patterns draws patterns once each as written, --bars draws a stretch of the song as it plays".into())),
+            (Some(list), None) => {
+                let names: Vec<String> = list.split(',').map(str::trim).filter(|n| !n.is_empty()).map(String::from).collect();
+                if names.is_empty() { return Err(blot("empty-crop", "--patterns names no pattern; list them by name, like --patterns chorus,bridge".into())); }
+                Ok(Some(Crop::Patterns(names)))
+            }
+            (None, Some(span)) => spanned(span).map(|(first, last)| Some(Crop::Bars(first, last))),
+        }
+    }
+
+    fn tag(&self) -> String {
+        match self {
+            Crop::Bars(first, last) if first == last => format!("bar-{first}"),
+            Crop::Bars(first, last) => format!("bars-{first}-{last}"),
+            Crop::Patterns(names) => names.join("+").replace(['/', '\\'], "_"),
+        }
+    }
+}
+
+fn spanned(text: &str) -> Result<(u64, u64), Blot> {
+    let read = |s: &str| s.trim().parse::<u64>().ok();
+    let span = match text.split_once("..").or_else(|| text.split_once('-')) {
+        Some((first, last)) => read(first).zip(read(last)),
+        None => read(text).map(|bar| (bar, bar)),
+    };
+    match span {
+        None => Err(blot("bad-bars", format!("`{text}` isn't a span of bars; write the first and last bar of the song as it plays, like 17..24 (both ends included), or one bar like 17"))),
+        Some((0, _)) => Err(blot("bad-bars", format!("bars count from 1, so `{text}` reaches for a bar before the song starts"))),
+        Some((first, last)) if first > last => Err(blot("bad-bars", format!("`{text}` runs backwards; write the earlier bar first, like {last}..{first}"))),
+        Some(span) => Ok(span),
+    }
+}
+
+struct Cut { scope: String, names: Vec<String>, json: Value, warnings: Vec<Blot> }
+
+struct Sheet<'s> { name: String, label: String, pattern: Cow<'s, Pattern>, first: u64, lead: usize }
+
+struct Play<'s> { cue: &'s Cue, pattern: &'s Pattern, first: u64 }
+
+impl Play<'_> {
+    fn last(&self) -> u64 { self.first + u64::from(self.pattern.bars) - 1 }
+}
+
+fn playbill(song: &Song) -> Vec<Play<'_>> {
+    let mut bill = Vec::new();
+    let mut downbeat = 1;
+    for cue in &song.setlist {
+        let Some(pattern) = song.pattern(&cue.pattern) else { continue };
+        bill.push(Play { cue, pattern, first: downbeat });
+        downbeat += u64::from(pattern.bars);
+    }
+    bill
+}
+
+fn whole(song: &Song) -> Vec<Sheet<'_>> {
+    song.patterns.iter().map(|p| Sheet { name: p.name.clone(), label: measures(p), pattern: Cow::Borrowed(p), first: 1, lead: 0 }).collect()
+}
+
+fn snip<'s>(song: &'s Song, crop: &Crop) -> Result<(Vec<Sheet<'s>>, Cut), Vec<Blot>> {
+    match crop {
+        Crop::Patterns(names) => chosen(song, names),
+        Crop::Bars(first, last) => window(song, *first, *last),
+    }
+}
+
+fn chosen<'s>(song: &'s Song, names: &[String]) -> Result<(Vec<Sheet<'s>>, Cut), Vec<Blot>> {
+    let known = song.patterns.iter().map(|p| format!("`{}`", p.name)).collect::<Vec<_>>().join(", ");
+    let strangers: Vec<Blot> = names.iter().filter(|n| song.pattern(n).is_none()).map(|n| blot("unknown-pattern", if known.is_empty() { format!("no pattern is named `{n}`; this song declares no patterns") } else { format!("no pattern is named `{n}`; the patterns are {known}") })).collect();
+    if !strangers.is_empty() { return Err(strangers); }
+    let bill = playbill(song);
+    let sheets: Vec<Sheet> = song.patterns.iter().filter(|p| names.contains(&p.name)).map(|p| Sheet { name: p.name.clone(), label: format!("{}, {}", measures(p), billing(p, &bill)), pattern: Cow::Borrowed(p), first: 1, lead: 0 }).collect();
+    let shown: Vec<String> = sheets.iter().map(|s| s.name.clone()).collect();
+    let cut = Cut { scope: format!("{} of {} patterns, as written", sheets.len(), song.patterns.len()), json: json!({ "patterns": shown }), names: shown, warnings: Vec::new() };
+    Ok((sheets, cut))
+}
+
+fn billing(pattern: &Pattern, bill: &[Play]) -> String {
+    let plays: Vec<&Play> = bill.iter().filter(|p| p.cue.pattern == pattern.name).collect();
+    let spans: Vec<String> = plays.iter().take(BILLED).map(|p| format!("{}{}", span(p.first, p.last()), shifted(p.cue.shift))).collect();
+    let more = plays.len().saturating_sub(BILLED);
+    match plays.len() {
+        0 => "never played".into(),
+        n => format!("plays at song bar{} {}{}", if n == 1 && pattern.bars == 1 { "" } else { "s" }, spans.join(", "), if more > 0 { format!(", and {more} more") } else { String::new() }),
+    }
+}
+
+fn window<'s>(song: &'s Song, first: u64, asked: u64) -> Result<(Vec<Sheet<'s>>, Cut), Vec<Blot>> {
+    let bill = playbill(song);
+    let length = bill.last().map_or(0, Play::last);
+    if first > length { return Err(vec![blot("bars-past-end", format!("the song is {length} bar{} long as it plays, so bar {first} never sounds", if length == 1 { "" } else { "s" }))]); }
+    let last = asked.min(length);
+    let mut sheets = Vec::new();
+    for play in bill.iter().filter(|p| p.first <= last && p.last() >= first) {
+        let heard = transposed(song, play.pattern, play.cue).map_err(|e| vec![unplayable(&e, play.cue)])?;
+        let local = |bar: u64| u32::try_from(bar - play.first + 1).expect("a bar inside a play fits its pattern's u32 bar count");
+        let (from, to) = (local(first.max(play.first)), local(last.min(play.last())));
+        let entire = (from, to) == (1, play.pattern.bars);
+        let label = if entire { measures(play.pattern) } else { format!("{} of {}, grid {}", bars(from.into(), to.into()), play.pattern.bars, play.pattern.grid) };
+        let downbeat = play.first + u64::from(from) - 1;
+        let pattern = if entire { heard } else { Cow::Owned(excerpt(&heard, from, to)) };
+        sheets.push(Sheet { name: format!("{}{}", play.cue.pattern, shifted(play.cue.shift)), label, pattern, first: downbeat, lead: usize::try_from(downbeat - first).unwrap_or(usize::MAX) });
+    }
+    let warnings = if asked > length { vec![blot("crop-trimmed", format!("the song ends at bar {length} as it plays, so the crop stops there instead of bar {asked}"))] } else { Vec::new() };
+    let cut = Cut { scope: format!("song {} of {length}, as played", bars(first, last)), names: sheets.iter().map(|s| s.name.clone()).collect(), json: json!({ "bars": [first, last], "song_bars": length }), warnings };
+    Ok((sheets, cut))
+}
+
+fn excerpt(pattern: &Pattern, from: u32, to: u32) -> Pattern {
+    let grid = u64::from(pattern.grid);
+    let (open, close) = (u64::from(from - 1) * grid, u64::from(to) * grid);
+    let lanes = pattern.lanes.iter().map(|lane| {
+        let notes = lane.notes.iter().filter_map(|note| {
+            let start = note.at.tick(pattern.grid);
+            let (head, tail) = (start.max(open), (start + u64::from(note.len)).min(close));
+            (head < tail).then(|| Note { at: Position::from_tick(head - open, pattern.grid), len: u32::try_from(tail - head).expect("a clipped note is never longer than the note"), ..note.clone() })
+        }).collect();
+        Lane { name: lane.name.clone(), params: lane.params.clone(), notes, line: lane.line }
+    }).collect();
+    Pattern { name: pattern.name.clone(), bars: to - from + 1, grid: pattern.grid, lanes, line: pattern.line }
+}
+
+fn measures(p: &Pattern) -> String { format!("{} bar{}, grid {}", p.bars, if p.bars == 1 { "" } else { "s" }, p.grid) }
+
+fn span(first: u64, last: u64) -> String { if first == last { first.to_string() } else { format!("{first}-{last}") } }
+
+fn bars(first: u64, last: u64) -> String { format!("bar{} {}", if first == last { "" } else { "s" }, span(first, last)) }
+
+fn shifted(shift: i8) -> String { if shift == 0 { String::new() } else { format!(" {shift:+}") } }
 
 struct Blot { human: String, json: Value }
 
@@ -75,6 +232,16 @@ fn blot(code: &str, message: String) -> Blot {
 
 fn misprint(e: &ScoreError) -> Blot {
     Blot { json: json!({ "code": e.fault.code(), "message": e.fault.to_string(), "pattern": e.pattern, "lane": e.lane, "at": e.at.map(|at| at.to_string()), "line": e.line }), human: e.to_string() }
+}
+
+fn unplayable(e: &RenderError, cue: &Cue) -> Blot {
+    let (code, lane, at) = match e {
+        RenderError::Shifted { lane, at, .. } => ("transposed-out-of-range", Some(lane), Some(at)),
+        RenderError::Ornament { lane, at, flaw, .. } => (flaw.code(), Some(lane), Some(at)),
+        RenderError::Profile(_) => ("unknown-profile", None, None),
+        _ => ("unplayable", None, None),
+    };
+    Blot { json: json!({ "code": code, "message": e.to_string(), "pattern": cue.pattern, "lane": lane, "at": at.map(|at| at.to_string()), "line": cue.line }), human: e.to_string() }
 }
 
 
@@ -92,40 +259,43 @@ impl<'s> Band<'s> {
     }
 }
 
-fn roll(song: &Song) -> Result<Canvas, String> {
+fn roll(song: &Song, sheets: &[Sheet], crop: Option<&str>) -> Result<Canvas, String> {
     let mut strays: Vec<&str> = Vec::new();
     for lane in song.patterns.iter().flat_map(|p| &p.lanes) {
         if VOICES.iter().all(|(voice, _)| *voice != lane.name) && !strays.contains(&lane.name.as_str()) { strays.push(&lane.name); }
     }
     let hue = |name: &str| VOICES.iter().find(|(voice, _)| *voice == name).map_or_else(|| STRAYS[strays.iter().position(|s| *s == name).unwrap_or(0) % STRAYS.len()], |(_, rgb)| *rgb);
-    let sheets: Vec<(&Pattern, Vec<Band>)> = song.patterns.iter().map(|p| (p, p.lanes.iter().map(|l| Band::of(l, hue(&l.name))).collect())).collect();
-    let widest = song.patterns.iter().map(|p| p.bars as usize).max().unwrap_or(1).max(1);
+    let staves: Vec<(&Sheet, Vec<Band>)> = sheets.iter().map(|s| (s, s.pattern.lanes.iter().map(|l| Band::of(l, hue(&l.name))).collect())).collect();
+    let widest = sheets.iter().map(|s| s.lead.saturating_add(s.pattern.bars as usize)).max().unwrap_or(1).max(1);
     let bar_px = (1024 / widest).clamp(64, 512);
-    let gutter = sheets.iter().flat_map(|(_, bands)| bands).flat_map(|b| &b.captions).map(|c| measure(c, INK) + MARGIN).max().unwrap_or(0);
+    let gutter = staves.iter().flat_map(|(_, bands)| bands).flat_map(|b| &b.captions).map(|c| measure(c, INK) + MARGIN).max().unwrap_or(0);
     let left = MARGIN + gutter;
     let heading = song.profile.as_ref().map_or_else(|| format!("tempo {}", song.tempo), |p| format!("tempo {}, profile {p}", song.tempo));
-    let labels: Vec<String> = song.patterns.iter().map(|p| format!("{} bar{}, grid {}", p.bars, if p.bars == 1 { "" } else { "s" }, p.grid)).collect();
-    let titled = MARGIN + measure(&song.title, TITLE) + MARGIN + measure(&heading, INK);
-    let named_widest = sheets.iter().zip(&labels).map(|((p, _), label)| MARGIN + measure(&p.name, INK) + 12 + measure(label, INK)).max().unwrap_or(0);
-    let width = (left + widest * bar_px).max(titled).max(named_widest) + MARGIN;
+    let crop = crop.map(|scope| format!("crop: {scope}"));
+    let titled = MARGIN + measure(&song.title, TITLE) + MARGIN + measure(&heading, INK) + crop.as_ref().map_or(0, |c| MARGIN + measure(c, INK));
+    let named_widest = sheets.iter().map(|s| MARGIN + measure(&s.name, INK) + 12 + measure(&s.label, INK)).max().unwrap_or(0);
+    let width = widest.saturating_mul(bar_px).saturating_add(left).max(titled).max(named_widest) + MARGIN;
     let tall = |bands: &[Band]| LINE + 4 + RULER + bands.iter().map(|b| b.height + 2).sum::<usize>();
-    let height = sheets.iter().fold(MARGIN + HEAD, |y, (_, bands)| y + tall(bands) + GAP).saturating_sub(GAP).max(MARGIN + HEAD) + MARGIN;
-    if width > LIMIT || height > LIMIT { return Err(format!("the roll would be {width}x{height} pixels, past the {LIMIT}-pixel limit on a side; that's too many bars or lanes for one picture")); }
+    let height = staves.iter().fold(MARGIN + HEAD, |y, (_, bands)| y + tall(bands) + GAP).saturating_sub(GAP).max(MARGIN + HEAD) + MARGIN;
+    let way_out = if crop.is_some() { "narrow the crop" } else { "crop it with --bars or --patterns" };
+    if width > LIMIT || height > LIMIT { return Err(format!("the roll would be {width}x{height} pixels, past the {LIMIT}-pixel limit on a side; that's too many bars or lanes for one picture, so {way_out}")); }
 
     let mut canvas = Canvas::new(width, height);
     let mut y = MARGIN;
     let x = canvas.write(MARGIN, y, &song.title, TITLE, CHALK);
-    canvas.write(x + MARGIN, y + (TITLE - INK) * GLYPH_H, &heading, INK, SMUDGE);
+    let x = canvas.write(x + MARGIN, y + (TITLE - INK) * GLYPH_H, &heading, INK, SMUDGE);
+    if let Some(crop) = &crop { canvas.write(x + MARGIN, y + (TITLE - INK) * GLYPH_H, crop, INK, CHALK); }
     y += HEAD;
-    for ((pattern, bands), label) in sheets.iter().zip(&labels) {
-        let x = canvas.write(MARGIN, y, &pattern.name, INK, CHALK);
-        canvas.write(x + 12, y, label, INK, SMUDGE);
+    for (sheet, bands) in &staves {
+        let x = canvas.write(MARGIN, y, &sheet.name, INK, CHALK);
+        canvas.write(x + 12, y, &sheet.label, INK, SMUDGE);
         y += LINE + 4;
-        let (bars, grid) = (pattern.bars as usize, pattern.grid as usize);
+        let (pattern, bars, grid) = (&sheet.pattern, sheet.pattern.bars as usize, sheet.pattern.grid as usize);
+        let left = left + sheet.lead * bar_px;
         let span = bars * bar_px;
         let at = |tick: usize| left + tick * bar_px / grid;
         let beats: Vec<usize> = if grid.is_multiple_of(4) { (0..bars * 4).map(|b| b * grid / 4).filter(|t| !t.is_multiple_of(grid)).collect() } else { Vec::new() };
-        for bar in 0..bars { canvas.write(at(bar * grid) + 6, y, &(bar + 1).to_string(), INK, CHALK); }
+        for bar in 0..bars { canvas.write(at(bar * grid) + 6, y, &(sheet.first + bar as u64).to_string(), INK, CHALK); }
         if bar_px / grid >= 4 { for tick in 0..bars * grid { canvas.fill(at(tick), y + RULER - 5, 1, 5, SMUDGE); } }
         for &tick in &beats { canvas.fill(at(tick), y + RULER - 10, 1, 10, SMUDGE); }
         for bar in 0..=bars { canvas.fill(at(bar * grid) - 1, y, 2, RULER, BARLINE); }
@@ -306,7 +476,7 @@ mod tests {
 
     fn rolled(text: &str) -> Canvas {
         let song = Song::parse(text).unwrap_or_else(|errors| panic!("the test score doesn't parse: {errors:?}"));
-        roll(&song).unwrap_or_else(|why| panic!("{why}"))
+        roll(&song, &whole(&song), None).unwrap_or_else(|why| panic!("{why}"))
     }
 
     fn pixel(canvas: &Canvas, x: usize, y: usize) -> Rgb {
@@ -345,7 +515,119 @@ mod tests {
     #[test]
     fn a_roll_too_big_to_look_at_is_refused_not_allocated() {
         let song = Song::parse("song \"t\" tempo 120\npattern p bars 400 grid 4\nlane pulse1\n  1.1: C4 x1\n").unwrap();
-        assert!(roll(&song).is_err_and(|why| why.starts_with("the roll would be 25718x")));
+        assert!(roll(&song, &whole(&song), None).is_err_and(|why| why.starts_with("the roll would be 25718x") && why.ends_with("crop it with --bars or --patterns")));
+    }
+
+    const DUET: &str = "song \"t\" tempo 120\npattern a bars 2 grid 4\nlane pulse1\n  1.1: C4 x2\n  1.3: E4 x4\n  2.3: D4 x2\npattern b bars 2 grid 4\nlane pulse1\n  1.1: D4 x8\npattern c bars 1 grid 4\nlane pulse2\n  1: C3 x4\nplay\n  a\n  b\n  a +2\n";
+
+    fn duet() -> Song { Song::parse(DUET).unwrap_or_else(|errors| panic!("the duet doesn't parse: {errors:?}")) }
+
+    fn cropped<'s>(song: &'s Song, crop: &Crop) -> (Vec<Sheet<'s>>, Cut) { snip(song, crop).unwrap_or_else(|blots| panic!("{:?}", blots.iter().map(|b| &b.human).collect::<Vec<_>>())) }
+
+    fn codes(blots: &[Blot]) -> Vec<&str> { blots.iter().map(|b| b.json["code"].as_str().unwrap()).collect() }
+
+    fn asked(patterns: Option<&str>, bars: Option<&str>) -> Result<Option<Crop>, Blot> { Crop::asked(&Args { input: "song.piro".into(), output: None, patterns: patterns.map(Into::into), bars: bars.map(Into::into) }) }
+
+    #[test]
+    fn a_whole_unshifted_play_crops_to_the_full_rolls_own_sheet_pixel_for_pixel() {
+        let song = duet();
+        let full = roll(&song, &whole(&song), None).unwrap();
+        let (sheets, cut) = cropped(&song, &Crop::Bars(1, 2));
+        let crop = roll(&song, &sheets, Some(&cut.scope)).unwrap();
+        assert_eq!(full.width, crop.width);
+        let row = |y: usize| y * crop.width * 3;
+        let sheet = row(MARGIN + HEAD)..row(crop.height - MARGIN);
+        assert!(full.ink[sheet.clone()] == crop.ink[sheet], "bars 1-2 are pattern a played as written, so they should draw exactly as a does in the full roll");
+        assert!(full.ink[..row(MARGIN + HEAD)] != crop.ink[..row(MARGIN + HEAD)], "the crop has to say it's a crop up top");
+    }
+
+    #[test]
+    fn a_bars_crop_walks_the_song_as_it_plays() {
+        let song = duet();
+        let (sheets, cut) = cropped(&song, &Crop::Bars(2, 5));
+        assert_eq!(sheets.iter().map(|s| (s.name.as_str(), s.label.as_str(), s.first, s.lead)).collect::<Vec<_>>(), [("a", "bar 2 of 2, grid 4", 2, 0), ("b", "2 bars, grid 4", 3, 1), ("a +2", "bar 1 of 2, grid 4", 5, 3)]);
+        assert!(matches!(sheets[1].pattern, Cow::Borrowed(_)), "a whole unshifted play is drawn straight from the score");
+        let notes = |s: &Sheet| s.pattern.lanes[0].notes.iter().map(|n| (n.at.to_string(), n.pitch, n.len)).collect::<Vec<_>>();
+        assert_eq!(notes(&sheets[0]), [("1.1".into(), Some(64), 2), ("1.3".into(), Some(62), 2)], "the E4 ringing over the bar line keeps only its tail");
+        assert_eq!(notes(&sheets[2]), [("1.1".into(), Some(62), 2), ("1.3".into(), Some(66), 2)], "the third play is a up two semitones, and its E4 is cut at the crop's edge");
+        assert_eq!((cut.scope.as_str(), cut.names.join(", ")), ("song bars 2-5 of 6, as played", "a, b, a +2".into()));
+        assert_eq!(cut.json, json!({ "bars": [2, 5], "song_bars": 6 }));
+        assert!(cut.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_patterns_crop_draws_each_pattern_once_and_says_where_it_plays() {
+        let song = duet();
+        let (sheets, cut) = cropped(&song, &Crop::Patterns(vec!["c".into(), "a".into(), "a".into()]));
+        assert_eq!(sheets.iter().map(|s| (s.name.as_str(), s.label.as_str(), s.first, s.lead)).collect::<Vec<_>>(), [("a", "2 bars, grid 4, plays at song bars 1-2, 5-6 +2", 1, 0), ("c", "1 bar, grid 4, never played", 1, 0)]);
+        assert_eq!(cut.scope, "2 of 3 patterns, as written");
+        assert_eq!(cut.json, json!({ "patterns": ["a", "c"] }));
+        let encore = Song::parse(&format!("song \"t\" tempo 120\npattern ding bars 1 grid 4\nlane pulse1\n  1: C5 x4\nplay\n{}", "  ding\n".repeat(6))).unwrap();
+        assert_eq!(cropped(&encore, &Crop::Patterns(vec!["ding".into()])).0[0].label, "1 bar, grid 4, plays at song bars 1, 2, 3, 4, and 2 more");
+        let once = Song::parse("song \"t\" tempo 120\npattern ding bars 1 grid 4\nlane pulse1\n  1: C5 x4\n").unwrap();
+        assert_eq!(cropped(&once, &Crop::Patterns(vec!["ding".into()])).0[0].label, "1 bar, grid 4, plays at song bar 1");
+    }
+
+    #[test]
+    fn crops_are_refused_in_plain_words() {
+        assert_eq!(asked(Some("a"), Some("1..2")).err().map(|b| b.json["code"].clone()), Some(json!("two-crops")));
+        assert_eq!(asked(Some(" , "), None).err().map(|b| b.json["code"].clone()), Some(json!("empty-crop")));
+        assert!(matches!(asked(Some("verse, chorus"), None), Ok(Some(Crop::Patterns(names))) if names == ["verse", "chorus"]));
+        assert!(matches!(asked(None, None), Ok(None)));
+        for (text, span) in [("17..24", (17, 24)), ("17-24", (17, 24)), ("17", (17, 17)), (" 3 .. 3 ", (3, 3))] { assert_eq!(spanned(text).ok(), Some(span), "{text}"); }
+        for (text, why) in [("17:24", "isn't a span"), ("1..2..3", "isn't a span"), ("-4", "isn't a span"), ("0..4", "count from 1"), ("24..17", "like 17..24")] {
+            assert!(spanned(text).is_err_and(|b| b.human.contains(why)), "{text} should be refused with {why:?}");
+        }
+        let song = duet();
+        let strangers = snip(&song, &Crop::Patterns(vec!["a".into(), "chorus".into()])).err().unwrap();
+        assert_eq!(codes(&strangers), ["unknown-pattern"]);
+        assert_eq!(strangers[0].human, "no pattern is named `chorus`; the patterns are `a`, `b`, `c`");
+        assert_eq!(codes(&snip(&song, &Crop::Bars(7, 9)).err().unwrap()), ["bars-past-end"]);
+        let (sheets, trimmed) = cropped(&song, &Crop::Bars(5, 40));
+        assert_eq!((sheets.len(), trimmed.scope.as_str()), (1, "song bars 5-6 of 6, as played"));
+        assert_eq!(codes(&trimmed.warnings), ["crop-trimmed"]);
+    }
+
+    #[test]
+    fn a_transpose_past_the_chip_is_refused_not_drawn() {
+        let song = Song::parse("song \"t\" tempo 120\npattern p bars 1 grid 4\nlane pulse1\n  1: B7 x4\nplay\n  p\n  p +12\n").unwrap();
+        assert_eq!(cropped(&song, &Crop::Bars(1, 1)).0.len(), 1);
+        let refused = snip(&song, &Crop::Bars(1, 2)).err().unwrap();
+        assert_eq!(codes(&refused), ["transposed-out-of-range"]);
+        assert_eq!((refused[0].json["pattern"].clone(), refused[0].json["line"].clone()), (json!("p"), json!(7)));
+    }
+
+    #[test]
+    fn a_crop_of_a_four_billion_bar_song_costs_nothing() {
+        let song = Song::parse("song \"t\" tempo 120\npattern endless bars 4000000000 grid 255\nlane pulse1\n  1.1: C4 x1\n  4000000000.255: E4 x1\nplay\n  endless\n  endless +12\n").unwrap();
+        let (sheets, cut) = cropped(&song, &Crop::Bars(3_999_999_999, 4_000_000_002));
+        assert_eq!(sheets.iter().map(|s| (s.name.as_str(), s.label.as_str(), s.first, s.lead)).collect::<Vec<_>>(), [("endless", "bars 3999999999-4000000000 of 4000000000, grid 255", 3_999_999_999, 0), ("endless +12", "bars 1-2 of 4000000000, grid 255", 4_000_000_001, 2)]);
+        assert_eq!(sheets[0].pattern.lanes[0].notes.iter().map(|n| (n.at.to_string(), n.pitch)).collect::<Vec<_>>(), [("2.255".into(), Some(64))]);
+        assert_eq!(sheets[1].pattern.lanes[0].notes.iter().map(|n| (n.at.to_string(), n.pitch)).collect::<Vec<_>>(), [("1.1".into(), Some(72))]);
+        let canvas = roll(&song, &sheets, Some(&cut.scope)).unwrap();
+        assert!(canvas.width < 2048, "four bars should draw small, got {}", canvas.width);
+        let (everything, all) = cropped(&song, &Crop::Bars(1, u64::MAX));
+        assert!(roll(&song, &everything, Some(&all.scope)).is_err_and(|why| why.ends_with("narrow the crop")));
+        let (endless, named) = cropped(&song, &Crop::Patterns(vec!["endless".into()]));
+        assert!(roll(&song, &endless, Some(&named.scope)).is_err());
+    }
+
+    #[test]
+    fn a_crop_lands_under_its_own_name_and_spares_the_full_roll() {
+        assert_eq!([Crop::Bars(17, 24).tag(), Crop::Bars(5, 5).tag(), Crop::Patterns(vec!["verse".into(), "a/b".into()]).tag()], ["bars-17-24", "bar-5", "verse+a_b"]);
+        let shelf = std::env::temp_dir().join(format!("piro-roll-crop-{}", std::process::id()));
+        std::fs::create_dir_all(&shelf).unwrap();
+        let score = shelf.join("duet.piro");
+        std::fs::write(&score, DUET).unwrap();
+        std::fs::write(shelf.join("duet.png"), b"the full roll").unwrap();
+        let args = Args { input: score.to_string_lossy().into(), output: None, patterns: None, bars: Some("3..4".into()) };
+        let Rolled { target: landed, cut, .. } = unroll(&args).unwrap_or_else(|blots| panic!("{:?}", blots.iter().map(|b| &b.human).collect::<Vec<_>>()));
+        assert_eq!(landed, shelf.join("duet.bars-3-4.png"));
+        assert_eq!(cut.map(|c| c.names), Some(vec!["b".to_owned()]));
+        assert_eq!(std::fs::read(shelf.join("duet.png")).unwrap(), b"the full roll");
+        let stdin = Args { input: "-".into(), output: None, patterns: Some("a".into()), bars: None };
+        assert_eq!(unroll(&stdin).err().map(|blots| codes(&blots).join(",")), Some("no-output".into()));
+        std::fs::remove_dir_all(&shelf).unwrap();
     }
 
     #[test]
