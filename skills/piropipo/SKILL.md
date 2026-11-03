@@ -25,6 +25,8 @@ report, not your imagination of the sound.
    the shallowest depth that works, a cramped slide tells you the note length that would
    fit it. fix and re-check until exit 0. don't fight a refusal: the error is the chip's
    real limit, not a suggestion.
+   add `--strict` to also refuse any slot no note or written rest (`- xN`) covers: each
+   gap is an `unwritten-silence` error with its span, for when silence should be on the page.
 4. **read the stats like ears.** duration, peak dbfs, and per-lane solo activity - a lane
    that "renders silent" is a part you wrote and nobody will hear. effect lines report what
    was *achieved*, not what you asked: the vibrato's real rate and its true cent swings
@@ -54,9 +56,11 @@ doorbell. learned from real compositions, so trust it as a starting point, not a
   `vol 4` and `duty 12.5`. the single most recognizable NES texture.
 - **duty is tone color.** 50 is round and hollow, 25 is the classic bright lead, 12.5 is
   thin and sharp. a per-note `duty` flips color mid-phrase; the lane param sets the default.
-- **fade endings.** a long held note with `vol 12 fade` is the classic outro. the triangle
-  can't fade (no volume knob), so end the bass deliberately on a barline instead - a clean
-  stop reads as intent, a mid-bar cut reads as a mistake.
+- **fade endings.** a long held note with `vol 12 fade` is the classic outro, and `arp
+  0,4,7 vol 12 fade` on that note fades the whole chord - the textbook NES ending (the
+  fade's last step is silent on purpose). the triangle can't fade (no volume knob),
+  so end the bass deliberately on a barline instead - a clean stop reads as intent,
+  a mid-bar cut reads as a mistake.
 - **the snare roll.** consecutive `x1` noise notes with climbing `vol` values. volume is
   the articulation; the pitch barely matters.
 - **a slide (`from`) is a scoop, not a glissando.** the written pitch is the note you'll

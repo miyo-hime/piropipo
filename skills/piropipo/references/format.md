@@ -60,6 +60,10 @@ note. the grid is time resolution only; it has no effect on tempo.
 - a note may **not** run past the end of its pattern, and that includes ringing on into
   whichever pattern plays next. each pattern is a closed box.
 - two notes in the same lane may **not** overlap. a lane is one voice.
+- two back-to-back notes at the same pitch are **inaudible as two**: the chip has no
+  attack, so they render sample-identical to one held note. to hear a retrigger, articulate
+  it - a one-slot rest, a `vol` change, a `duty` flip, or a `fade` (effects DO restart per
+  note).
 
 ## rests
 
