@@ -249,7 +249,7 @@ pub fn named(pitch: impl Into<i16>) -> String {
     format!("{}{}", SCIENTIFIC[usize::from(pitch.rem_euclid(12).unsigned_abs())], pitch.div_euclid(12) - 1)
 }
 
-fn roster<'a>(names: impl Iterator<Item = &'a str>, conjunction: &str) -> String {
+pub(crate) fn roster<'a>(names: impl Iterator<Item = &'a str>, conjunction: &str) -> String {
     let names: Vec<String> = names.map(|n| format!("`{n}`")).collect();
     match names.as_slice() {
         [] => String::new(),

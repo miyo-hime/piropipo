@@ -1,5 +1,5 @@
 use crate::profile::{self, Breach, Flaw, Part, Setup, Voice, named};
-use crate::score::{Bend, Cue, Note, Ornaments, Pattern, Position, Song};
+use crate::score::{Bend, Cue, MOST_BEATS, Note, Ornaments, Pattern, Position, Song};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -38,6 +38,8 @@ pub enum RenderError {
     Profile(String),
     Tempo(u32),
     Grid(u32),
+    Beats(u32),
+    Meter { beats: u32, grid: u32 },
     Lane(String),
     Param { lane: String, key: String, takes: &'static [&'static str] },
     Volume { lane: String, key: String },
@@ -56,6 +58,8 @@ impl fmt::Display for RenderError {
             RenderError::Profile(profile) => write!(f, "{}", Breach::Profile(profile.clone())),
             RenderError::Tempo(tempo) => write!(f, "tempo {tempo} is out of the renderer's reach; keep it between 1 and 255"),
             RenderError::Grid(grid) => write!(f, "grid {grid} is out of the renderer's reach; keep it between 1 and 255 slots per bar"),
+            RenderError::Beats(beats) => write!(f, "beats {beats} is out of the renderer's reach; keep it between 1 and {MOST_BEATS} beats per bar"),
+            RenderError::Meter { beats, grid } => write!(f, "grid {grid} at beats {beats} is out of the renderer's reach; its note lengths can't split a {beats}-beat bar into {grid} equal slots, and the finest grid under {grid} that can is {}", (1..*grid).rev().find(|g| staff(*beats, *g).is_ok()).unwrap_or(1)),
             RenderError::Lane(lane) => write!(f, "{}", Breach::Lane(lane.clone())),
             RenderError::Param { lane, key, takes } => write!(f, "lane {lane}: {}", Breach::Param { key: key.clone(), takes }),
             RenderError::Volume { lane, key } => write!(f, "lane {lane}: {}", Breach::Volume(key.clone())),
@@ -111,12 +115,12 @@ pub fn pattern_with(song: &Song, pattern: &Pattern, stencils: &mut Stencils) -> 
 
 pub fn vet(song: &Song, pattern: &Pattern) -> Result<(), RenderError> {
     let card = profile::card(song.profile.as_deref()).map_err(|breach| charged("", breach))?;
-    if !(1..=255).contains(&song.tempo) || !(1..=255).contains(&pattern.grid) { return Ok(()); }
+    let (true, Ok(staff)) = ((1..=255).contains(&song.tempo), staff(pattern.beats, pattern.grid)) else { return Ok(()) };
     for lane in &pattern.lanes {
         let Ok(part) = card.part(&lane.name) else { continue };
         for note in lane.notes.iter().filter(|n| part.plays(n).is_ok()) {
             let Some(pitch) = note.pitch else { continue };
-            timing(song.tempo, pattern.grid, note, pitch).map_err(|flaw| RenderError::Ornament { lane: lane.name.clone(), at: note.at, flaw, played: None })?;
+            timing(song.tempo, staff, note.at.tick(pattern.grid) * staff.unit, note, pitch).map_err(|flaw| RenderError::Ornament { lane: lane.name.clone(), at: note.at, flaw, played: None })?;
         }
     }
     Ok(())
@@ -145,27 +149,49 @@ pub fn transposed<'p>(song: &Song, pattern: &'p Pattern, cue: &Cue) -> Result<Co
     Ok(Cow::Owned(moved))
 }
 
-pub fn arp_rate(tempo: u32, grid: u32, len: u32) -> (u64, f64) {
-    let count = count(tempo, grid, len);
-    (count, rate(tempo, grid, len, count))
+pub fn arp_rate(tempo: u32, pattern: &Pattern, len: u32) -> Option<(u64, f64)> {
+    let staff = staff(pattern.beats, pattern.grid).ok().filter(|_| (1..=255).contains(&tempo))?;
+    let units = staff.span(len);
+    let count = count(tempo, staff.grid, units);
+    Some((count, rate(tempo, staff.grid, units, count)))
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Staff { grid: u32, unit: u64 }
+
+impl Staff {
+    fn span(self, slots: u32) -> u64 { u64::from(slots) * self.unit }
+}
+
+// ffmml lengths are fractions of a four-beat whole note, so any other meter is ruled onto the coarsest whole-note grid its slots land on
+fn staff(beats: u32, grid: u32) -> Result<Staff, RenderError> {
+    if !(1..=255).contains(&grid) { return Err(RenderError::Grid(grid)); }
+    if !(1..=MOST_BEATS).contains(&beats) { return Err(RenderError::Beats(beats)); }
+    let whole = 4 * grid;
+    let common = gcd(whole, beats);
+    let staff = Staff { grid: whole / common, unit: u64::from(beats / common) };
+    if staff.grid > 255 { return Err(RenderError::Meter { beats, grid }); }
+    Ok(staff)
+}
+
+fn gcd(a: u32, b: u32) -> u32 { if b == 0 { a } else { gcd(b, a % b) } }
 
 fn transcribe(song: &Song, pattern: &Pattern) -> Result<String, RenderError> { engrave(song, pattern, &mut Stencils::default()) }
 
 fn engrave(song: &Song, pattern: &Pattern, stencils: &mut Stencils) -> Result<String, RenderError> {
     let card = profile::card(song.profile.as_deref()).map_err(|breach| charged("", breach))?;
     if !(1..=255).contains(&song.tempo) { return Err(RenderError::Tempo(song.tempo)); }
-    if !(1..=255).contains(&pattern.grid) { return Err(RenderError::Grid(pattern.grid)); }
+    let staff = staff(pattern.beats, pattern.grid)?;
     if let Some(stray) = pattern.lanes.iter().find_map(|l| card.part(&l.name).err()) { return Err(charged("", stray)); }
     let mut plate = Plate::new();
-    let lines = card.parts.iter().map(|part| line(song.tempo, pattern, part, stencils, &mut plate)).collect::<Result<Vec<_>, _>>()?;
+    let lines = card.parts.iter().map(|part| line(song.tempo, pattern, staff, part, stencils, &mut plate)).collect::<Result<Vec<_>, _>>()?;
     Ok(plate.into_values().chain(lines).collect::<Vec<_>>().join("\n"))
 }
 
-fn line(tempo: u32, pattern: &Pattern, part: &Part, stencils: &mut Stencils, plate: &mut Plate) -> Result<String, RenderError> {
+fn line(tempo: u32, pattern: &Pattern, staff: Staff, part: &Part, stencils: &mut Stencils, plate: &mut Plate) -> Result<String, RenderError> {
     let Part { name, channel, voice, .. } = *part;
     let Pattern { bars, grid, .. } = *pattern;
-    let span = u64::from(bars) * u64::from(grid);
+    let span = u64::from(bars) * u64::from(grid) * staff.unit;
     let lane = pattern.lanes.iter().find(|l| l.name == name);
     let Setup { duty, volume } = part.setup(lane.map_or(&[][..], |l| l.params.as_slice())).map_err(|breach| charged(name, breach))?;
     // a triangle that rests before its first note idles at full positive output in ffmml (a DC shelf), so every voice starts at v0 and finds its volume on its first note
@@ -176,21 +202,21 @@ fn line(tempo: u32, pattern: &Pattern, part: &Part, stencils: &mut Stencils, pla
     let mut cursor = 0;
     for (i, (note, pitch)) in notes.into_iter().enumerate() {
         let Position { bar, slot } = note.at;
-        let start = note.at.tick(grid);
-        let end = start + u64::from(note.len);
+        let start = note.at.tick(grid) * staff.unit;
+        let end = start + staff.span(note.len);
         if bar == 0 || slot == 0 || slot > grid || note.len == 0 || start < cursor || end > span { return Err(RenderError::Misfit { lane: name.into(), at: note.at }); }
         part.plays(note).map_err(|breach| charged(name, breach))?;
         let snag = |flaw| RenderError::Ornament { lane: name.into(), at: note.at, flaw, played: None };
         let spell = |pitch: u8| voice.spell(pitch).ok_or_else(|| charged(name, Breach::Range { at: note.at, pitch, playable: part.playable }));
         let (octave, letter) = spell(pitch)?;
-        timing(tempo, grid, note, pitch).map_err(snag)?;
-        words.extend(lengths(grid, start - cursor).map(|d| format!("r{d}")));
+        timing(tempo, staff, start, note, pitch).map_err(snag)?;
+        words.extend(lengths(staff.grid, start - cursor).map(|d| format!("r{d}")));
         let Ornaments { bend, duty: tint, vol, fade } = &note.ornaments;
         let leveled = vol.is_some() || *fade;
         if i == 0 && !leveled { words.push(format!("v{volume}")); }
         if let Some(tint) = tint { words.push(format!("@{tint}")); }
         let stepped = matches!(bend, Some(Bend::Arpeggio(_) | Bend::Slide(_)));
-        let curve = if *fade { fall(vol.unwrap_or(volume), frames(tempo, grid, start, end)) } else { Vec::new() };
+        let curve = if *fade { fall(vol.unwrap_or(volume), frames(tempo, staff.grid, start, end)) } else { Vec::new() };
         match (*fade, vol) {
             (true, _) if !stepped => words.push(etch(stencils, plate, curve.clone()).ok_or_else(|| snag(Flaw::Crowded("fade")))?),
             (false, Some(vol)) => words.push(format!("v{vol}")),
@@ -202,54 +228,54 @@ fn line(tempo: u32, pattern: &Pattern, part: &Part, stencils: &mut Stencils, pla
                 let shape = [vib.delay, vib.speed, depth];
                 let n = file(&mut stencils.vibratos, shape).ok_or_else(|| snag(Flaw::Crowded("vibrato")))?;
                 plate.entry(("MP", n)).or_insert_with(|| format!("@MP{n} = {{{} {} {}}}", shape[0], shape[1], shape[2]));
-                words.extend([format!("MP{n}"), format!("o{octave}"), tie(&letter, grid, end - start), "MPOF".to_owned()]);
+                words.extend([format!("MP{n}"), format!("o{octave}"), tie(&letter, staff.grid, end - start), "MPOF".to_owned()]);
             }
             Some(Bend::Arpeggio(offsets)) => {
-                let steps = steps(tempo, grid, note.len);
-                let mut levels: Vec<u8> = remnants(&curve, tempo, grid, start, &steps).iter().filter_map(|r| r.first().copied()).collect();
+                let steps = steps(tempo, staff.grid, end - start);
+                let mut levels: Vec<u8> = remnants(&curve, tempo, staff.grid, start, &steps).iter().filter_map(|r| r.first().copied()).collect();
                 let silence = levels.pop().map(|_| Some("v0".to_owned()));
                 let mut dynamics = dynamics(levels).chain(silence);
                 for (&units, offset) in steps.iter().zip(offsets.iter().cycle()) {
                     let (octave, letter) = spell(u8::try_from(i16::from(pitch) + offset).unwrap_or(u8::MAX))?;
                     words.extend(dynamics.next().flatten());
-                    words.extend([format!("o{octave}"), tie(&letter, lattice(grid), units)]);
+                    words.extend([format!("o{octave}"), tie(&letter, lattice(staff.grid), units)]);
                 }
             }
             Some(Bend::Slide(from)) => {
                 let semitones = usize::from(pitch.abs_diff(*from));
-                let steps = steps(tempo, grid, note.len);
+                let steps = steps(tempo, staff.grid, end - start);
                 let (walk, hold) = steps.split_at(semitones);
-                let remnants = remnants(&curve, tempo, grid, start, &steps);
+                let remnants = remnants(&curve, tempo, staff.grid, start, &steps);
                 let mut dynamics = dynamics(remnants.iter().take(semitones).filter_map(|r| r.first().copied()));
                 let rungs = if *from < pitch { (*from..pitch).collect::<Vec<_>>() } else { (pitch + 1..=*from).rev().collect() };
                 for (&units, rung) in walk.iter().zip(rungs) {
                     let (octave, letter) = spell(rung)?;
                     words.extend(dynamics.next().flatten());
-                    words.extend([format!("o{octave}"), tie(&letter, lattice(grid), units)]);
+                    words.extend([format!("o{octave}"), tie(&letter, lattice(staff.grid), units)]);
                 }
                 if let Some(tail) = remnants.get(semitones) { words.push(etch(stencils, plate, tail.to_vec()).ok_or_else(|| snag(Flaw::Crowded("fade")))?); }
-                words.extend([format!("o{octave}"), tie(&letter, lattice(grid), hold.iter().sum())]);
+                words.extend([format!("o{octave}"), tie(&letter, lattice(staff.grid), hold.iter().sum())]);
             }
-            None => words.extend([format!("o{octave}"), tie(&letter, grid, end - start)]),
+            None => words.extend([format!("o{octave}"), tie(&letter, staff.grid, end - start)]),
         }
         if let (Some(_), Some(home)) = (tint, duty) { words.push(format!("@{home}")); }
         if leveled { words.push(format!("v{volume}")); }
         cursor = end;
     }
-    words.extend(lengths(grid, span - cursor).map(|d| format!("r{d}")));
+    words.extend(lengths(staff.grid, span - cursor).map(|d| format!("r{d}")));
     Ok(words.join(" "))
 }
 
 // `&` and never `^`: ffmml 0.1.2 only looks one command back for the note a `^` extends, so `c4^4^4` errors on the second tie
 fn tie(letter: &str, grid: u32, slots: u64) -> String { lengths(grid, slots).map(|d| format!("{letter}{d}")).collect::<Vec<_>>().join("&") }
 
-fn seconds(tempo: u32, grid: u32, slots: u32) -> f64 { f64::from(slots) * 240.0 / (f64::from(tempo) * f64::from(grid)) }
+fn seconds(tempo: u32, grid: u32, slots: u64) -> f64 { slots as f64 * 240.0 / (f64::from(tempo) * f64::from(grid)) }
 
 fn sample_at(tempo: u32, grid: u32, tick: u64) -> u128 { (u128::from(tick) * 240 * u128::from(SAMPLE_RATE)).div_ceil(u128::from(tempo) * u128::from(grid)) }
 
 fn frames(tempo: u32, grid: u32, start: u64, end: u64) -> u64 { u64::try_from((sample_at(tempo, grid, end) - sample_at(tempo, grid, start)).div_ceil(u128::from(FRAME))).unwrap_or(u64::MAX) }
 
-fn frames_in(tempo: u32, grid: u32, start: u64, len: u32) -> u64 { frames(tempo, grid, start, start + u64::from(len)) }
+fn frames_in(tempo: u32, grid: u32, start: u64, len: u64) -> u64 { frames(tempo, grid, start, start + len) }
 
 // one frame makes `last` zero and divides by it, so a slide's hold slices its note's curve instead of calling this again
 fn fall(level: u8, frames: u64) -> Vec<u8> {
@@ -277,40 +303,43 @@ fn dynamics(levels: impl IntoIterator<Item = u8>) -> impl Iterator<Item = Option
 // ※ steps live on the finest multiple of the grid at or under 255; mixed-denominator steps could get slow tempos nearer c255 if a song ever needs it
 fn lattice(grid: u32) -> u32 { 255 / grid * grid }
 
-fn count(tempo: u32, grid: u32, len: u32) -> u64 {
+fn count(tempo: u32, grid: u32, len: u64) -> u64 {
     let pace = u64::from(tempo) * u64::from(grid);
-    ((28_800 * u64::from(len) + pace - 1) / (2 * pace)).min(u64::from(len) * u64::from(lattice(grid) / grid))
+    ((28_800 * len + pace - 1) / (2 * pace)).min(len * u64::from(lattice(grid) / grid))
 }
 
-fn steps(tempo: u32, grid: u32, len: u32) -> Vec<u64> {
-    let units = u64::from(len) * u64::from(lattice(grid) / grid);
+fn steps(tempo: u32, grid: u32, len: u64) -> Vec<u64> {
+    let units = len * u64::from(lattice(grid) / grid);
     let count = count(tempo, grid, len);
     (0..count).map(|i| (i + 1) * units / count - i * units / count).collect()
 }
 
-fn rate(tempo: u32, grid: u32, len: u32, count: u64) -> f64 { count as f64 / seconds(tempo, grid, len) }
+fn rate(tempo: u32, grid: u32, len: u64, count: u64) -> f64 { count as f64 / seconds(tempo, grid, len) }
 
 fn fits(len: u32, admits: impl Fn(u32) -> bool) -> Option<u32> { (len.saturating_add(1)..=len.saturating_add(4096)).find(|l| admits(*l)) }
 
-fn timing(tempo: u32, grid: u32, note: &Note, pitch: u8) -> Result<(), Flaw> {
-    let start = note.at.tick(grid);
+fn timing(tempo: u32, staff: Staff, start: u64, note: &Note, pitch: u8) -> Result<(), Flaw> {
+    let Staff { grid, .. } = staff;
+    let len = staff.span(note.len);
     if note.ornaments.fade {
-        let frames = frames_in(tempo, grid, start, note.len);
-        if frames < 2 { return Err(Flaw::Blink { frames, fits: fits(note.len, |len| frames_in(tempo, grid, start, len) >= 2) }); }
+        let frames = frames_in(tempo, grid, start, len);
+        if frames < 2 { return Err(Flaw::Blink { frames, fits: fits(note.len, |len| frames_in(tempo, grid, start, staff.span(len)) >= 2) }); }
     }
     match &note.ornaments.bend {
-        Some(Bend::Vibrato(vib)) if u64::from(vib.delay) * u64::from(tempo) * u64::from(grid) >= 14_400 * u64::from(note.len) => Err(Flaw::Late { frames: vib.delay, note_ms: seconds(tempo, grid, note.len) * 1000.0 }),
-        Some(Bend::Arpeggio(offsets)) => arpeggiate(tempo, grid, note.len, offsets.len()),
-        Some(Bend::Slide(from)) => walk(tempo, grid, note.len, u16::from(pitch.abs_diff(*from))),
+        Some(Bend::Vibrato(vib)) if u64::from(vib.delay) * u64::from(tempo) * u64::from(grid) >= 14_400 * len => Err(Flaw::Late { frames: vib.delay, note_ms: seconds(tempo, grid, len) * 1000.0 }),
+        Some(Bend::Arpeggio(offsets)) => arpeggiate(tempo, staff, note.len, offsets.len()),
+        Some(Bend::Slide(from)) => walk(tempo, staff, note.len, u16::from(pitch.abs_diff(*from))),
         _ => Ok(()),
     }
 }
 
-fn arpeggiate(tempo: u32, grid: u32, len: u32, offsets: usize) -> Result<(), Flaw> {
+fn arpeggiate(tempo: u32, staff: Staff, len: u32, offsets: usize) -> Result<(), Flaw> {
+    let Staff { grid, .. } = staff;
     let offsets = offsets as u64;
-    let paced = |len: u32| { let count = count(tempo, grid, len); count >= offsets && (45.0..=75.0).contains(&rate(tempo, grid, len, count)) };
-    let steps = count(tempo, grid, len);
-    let rate = rate(tempo, grid, len, steps);
+    let paced = |len: u32| { let units = staff.span(len); let count = count(tempo, grid, units); count >= offsets && (45.0..=75.0).contains(&rate(tempo, grid, units, count)) };
+    let units = staff.span(len);
+    let steps = count(tempo, grid, units);
+    let rate = rate(tempo, grid, units, steps);
     let fastest = f64::from(tempo) * f64::from(lattice(grid)) / 240.0;
     if fastest < 45.0 { return Err(Flaw::Pace { rate, fastest, fits: None }); }
     if steps < offsets { return Err(Flaw::Crammed { offsets, steps, fits: fits(len, paced) }); }
@@ -318,10 +347,10 @@ fn arpeggiate(tempo: u32, grid: u32, len: u32, offsets: usize) -> Result<(), Fla
     Ok(())
 }
 
-fn walk(tempo: u32, grid: u32, len: u32, semitones: u16) -> Result<(), Flaw> {
-    let dwells = count(tempo, grid, len);
+fn walk(tempo: u32, staff: Staff, len: u32, semitones: u16) -> Result<(), Flaw> {
+    let dwells = count(tempo, staff.grid, staff.span(len));
     if dwells > u64::from(semitones) { return Ok(()); }
-    Err(Flaw::Cramped { semitones, dwells, fits: fits(len, |len| count(tempo, grid, len) > u64::from(semitones)) })
+    Err(Flaw::Cramped { semitones, dwells, fits: fits(len, |len| count(tempo, staff.grid, staff.span(len)) > u64::from(semitones)) })
 }
 
 fn lengths(grid: u32, slots: u64) -> impl Iterator<Item = u32> {
@@ -576,10 +605,10 @@ mod tests {
     fn step_schedules_sum_exactly_to_the_written_length() {
         for tempo in [1, 30, 61, 97, 120, 144, 200, 255] {
             for grid in [1, 3, 4, 7, 8, 12, 16, 24, 48, 64, 96, 128, 200, 255] {
-                for len in 1..=48 {
-                    let steps = steps(tempo, grid, len);
+                for len in 1..=48u32 {
+                    let steps = steps(tempo, grid, len.into());
                     let units = u64::from(len) * u64::from(lattice(grid) / grid);
-                    assert_eq!(steps.len() as u64, count(tempo, grid, len));
+                    assert_eq!(steps.len() as u64, count(tempo, grid, len.into()));
                     assert!(steps.iter().all(|s| *s >= 1), "tempo {tempo} grid {grid} x{len}: a step under the shortest note: {steps:?}");
                     if !steps.is_empty() { assert_eq!(steps.iter().sum::<u64>(), units, "tempo {tempo} grid {grid} x{len}: {steps:?}"); }
                     assert!(steps.iter().max().zip(steps.iter().min()).is_none_or(|(hi, lo)| hi - lo <= 1), "widening spreads one unit at most: {steps:?}");
@@ -652,7 +681,7 @@ mod tests {
         assert!(fast.to_string().starts_with("the arp steps 77.3 times a second, outside 45 to 75"), "{fast}");
         let crammed = flaw("song \"s\" tempo 120\npattern p bars 1 grid 64\nlane pulse1\n  1: A4 x1 arp 0,4,7\n");
         assert_eq!(crammed, Flaw::Crammed { offsets: 3, steps: 2, fits: Some(2) });
-        assert_eq!(arp_rate(120, 16, 4), (30, 60.0));
+        assert_eq!(arp_rate(120, &song("song \"s\" tempo 120\npattern p bars 1 grid 16\n").patterns[0], 4), Some((30, 60.0)));
     }
 
     #[test]
@@ -837,6 +866,82 @@ mod tests {
             let heard = pair(bend);
             assert!(runs(&heard[half..]).iter().all(|r| (50..=51).contains(r)), "{bend} leaked pitch into the next note");
             assert_eq!(heard[half..].iter().map(|s| s.unsigned_abs()).max(), clean[half..].iter().map(|s| s.unsigned_abs()).max(), "{bend}");
+        }
+    }
+
+    fn metered(beats: u32, grid: u32, tempo: u32, notes: &str) -> String { format!("song \"s\" tempo {tempo}\npattern p bars 1 beats {beats} grid {grid}\nlane pulse1\n{notes}") }
+
+    #[test]
+    fn a_bar_lasts_its_own_beats_at_the_song_tempo() {
+        let seven = render(&metered(7, 14, 120, "  1: C4 x14\n")).unwrap();
+        assert_eq!(seven.len(), 154_350, "seven beats at 120 is 3.5 seconds");
+        assert!(seven.iter().all(|s| *s != 0));
+        assert_eq!(engraved(&metered(7, 14, 120, "  1: C4 x14\n")).lines().next(), Some("A t120 v0 @2 v10 o4 c1&c2&c4"), "a half-beat slot is an eighth of ffmml's four-beat whole note");
+        assert_eq!(render(&metered(7, 16, 120, "  1: C4 x16\n")).unwrap().len(), 154_350, "sixteen slots of a seven-beat bar land on a 64th staff, seven to a slot");
+        assert_eq!(render(&metered(5, 10, 150, "  1: C4 x10\n")).unwrap().len(), 88_200);
+        assert_eq!(render(&metered(32, 255, 255, "  1: C4 x1\n")).unwrap().len(), samples_in(255 * 8, 255, 255), "the longest bar on the finest grid still has a staff, eight 255ths of a whole note to a slot");
+        let gapped = render(&metered(7, 14, 120, "  1: A4 x2\n  9: A4 x2\n")).unwrap();
+        assert_lit_exactly(&gapped, &[(0, 2), (8, 2)], 11_025);
+    }
+
+    #[test]
+    fn common_time_spelled_out_is_the_default_to_the_byte() {
+        let spelled = spec_example().lines().map(|l| if l.starts_with("pattern ") { l.replace(" grid ", " beats 4 grid ") } else { l.to_owned() }).collect::<Vec<_>>().join("\n");
+        assert!(spelled.contains("beats 4 grid 16"), "{spelled}");
+        assert_eq!(engraved(&spelled), engraved(spec_example()));
+        assert_eq!(render(&spelled).unwrap(), render(spec_example()).unwrap());
+        let busy = "lane pulse1 duty 25\n  1: A4 x4 arp 0,4,7 vol 12 fade\n  5: C5 x4 from A4 fade\n  9: E5 x8 vib 20ct 6hz 50ms\nlane noise\n  1: C4 x16 fade\n";
+        assert_eq!(engraved(&format!("song \"s\" tempo 133\npattern p bars 1 beats 4 grid 16\n{busy}")), engraved(&format!("song \"s\" tempo 133\npattern p bars 1 grid 16\n{busy}")));
+    }
+
+    #[test]
+    fn a_meter_the_staff_cannot_hold_is_refused_with_a_grid_that_fits() {
+        let refused = render(&metered(7, 64, 120, "  1: C4 x1\n")).unwrap_err();
+        assert_eq!(refused, RenderError::Meter { beats: 7, grid: 64 });
+        assert_eq!(refused.to_string(), "grid 64 at beats 7 is out of the renderer's reach; its note lengths can't split a 7-beat bar into 64 equal slots, and the finest grid under 64 that can is 63");
+        assert!(render(&metered(7, 63, 120, "  1: C4 x1\n")).is_ok());
+        assert!(matches!(render(&metered(1, 255, 120, "")), Err(RenderError::Meter { beats: 1, grid: 255 })));
+        let mut odd = song(&metered(4, 16, 120, "  1: C4 x1\n"));
+        for (beats, refusal) in [(0, "beats 0 is out of the renderer's reach; keep it between 1 and 32 beats per bar"), (33, "beats 33 is out of the renderer's reach; keep it between 1 and 32 beats per bar")] {
+            odd.patterns[0].beats = beats;
+            assert_eq!(pattern(&odd, &odd.patterns[0]).unwrap_err().to_string(), refusal);
+            assert_eq!(vet(&odd, &odd.patterns[0]), Ok(()), "an unrenderable meter is never vetted note by note");
+            assert_eq!(arp_rate(120, &odd.patterns[0], 4), None);
+        }
+    }
+
+    #[test]
+    fn the_arp_window_moves_with_the_length_of_the_bar() {
+        let rushed = flaw(&metered(4, 56, 170, "  1: A4 x1 arp 0,7\n"));
+        assert!(matches!(rushed, Flaw::Pace { fits: Some(2), .. }), "{rushed:?}");
+        assert!(rushed.to_string().starts_with("the arp steps 79.3 times a second"), "{rushed}");
+        assert!(render(&metered(7, 56, 170, "  1: A4 x1 arp 0,7\n")).is_ok(), "the same slot in a seven-beat bar lasts 7/4 as long");
+        assert!(render(&metered(4, 32, 145, "  1: A4 x1 arp 0,7\n")).is_ok());
+        assert!(matches!(flaw(&metered(2, 32, 145, "  1: A4 x1 arp 0,7\n")), Flaw::Pace { fits: Some(2), .. }), "half the bar, half the slot, too fast again");
+        let bar = |beats| song(&metered(beats, 16, 120, ""));
+        assert_eq!([4, 7, 2].map(|b| arp_rate(120, &bar(b).patterns[0], 4)), [Some((30, 60.0)), Some((52, 52.0 / 0.875)), Some((15, 60.0))], "four slots of a seven-beat bar last 0.875 s");
+        assert!(matches!(flaw(&metered(7, 16, 30, "  1: A4 x16 arp 0,4,7\n")), Flaw::Pace { fits: None, .. }), "a 64th staff still can't step fast enough at tempo 30");
+    }
+
+    #[test]
+    fn fits_slides_fades_and_late_vibratos_count_the_bar_they_live_in() {
+        assert_eq!(flaw(&metered(4, 255, 255, "  1: C5 x1 fade\n")), Flaw::Blink { frames: 1, fits: Some(5) });
+        assert_eq!(flaw(&metered(8, 255, 255, "  1: C5 x1 fade\n")), Flaw::Blink { frames: 1, fits: Some(3) }, "fits names a length in the pattern's own slots");
+        assert_eq!(flaw(&metered(4, 255, 255, "  1: C5 x1 from B4\n")), Flaw::Cramped { semitones: 1, dwells: 0, fits: Some(7) });
+        assert_eq!(flaw(&metered(8, 255, 255, "  1: C5 x1 from B4\n")), Flaw::Cramped { semitones: 1, dwells: 0, fits: Some(4) });
+        assert_eq!(flaw(&metered(4, 16, 120, "  1: A4 x2 vib 20ct 6hz 250ms\n")), Flaw::Late { frames: 15, note_ms: 250.0 });
+        assert!(render(&metered(7, 16, 120, "  1: A4 x2 vib 20ct 6hz 250ms\n")).is_ok(), "two slots of a seven-beat bar outlast the delay");
+        assert_eq!(flaw(&metered(2, 16, 120, "  1: A4 x4 vib 20ct 6hz 250ms\n")), Flaw::Late { frames: 15, note_ms: 250.0 });
+    }
+
+    #[test]
+    fn effects_in_an_odd_meter_still_ring_exactly_as_long_as_their_note() {
+        let plain = render(&metered(7, 16, 120, "  1: A4 x7\n")).unwrap();
+        let sounding = |s: &[i16]| s.iter().rposition(|x| *x != 0);
+        for effect in ["arp 0,4,7", "from C4", "from C6", "vib 20ct 6hz", "arp 0,7 fade", "from C4 vol 12 fade", "fade"] {
+            let bent = render(&metered(7, 16, 120, &format!("  1: A4 x7 {effect}\n"))).unwrap();
+            assert_eq!(bent.len(), plain.len(), "{effect}");
+            if !effect.ends_with("fade") { assert_eq!(sounding(&bent).map(|i| i / 1000), sounding(&plain).map(|i| i / 1000), "{effect} should stop where the note does"); }
         }
     }
 

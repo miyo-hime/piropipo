@@ -3,7 +3,7 @@ use crate::surface;
 use crate::vu::{self, Reading};
 use piropipo::profile::{self, Breach, Charge};
 use piropipo::render::{self, RenderError, SAMPLE_RATE, Stencils};
-use piropipo::score::{Bend, Cue, Lane, Note, Pattern, Position, ScoreError, Song};
+use piropipo::score::{Bend, COMMON_TIME, Cue, Lane, Note, Pattern, Position, ScoreError, Song};
 use serde_json::{Value, json};
 use std::fmt;
 use std::ops::Range;
@@ -174,9 +174,12 @@ fn tell(output: Option<&Path>, stats: &Stats, detail: Detail, warnings: &[Remark
 }
 
 fn overlong(song: &Song) -> Option<Remark> {
-    let bars: u64 = song.setlist.iter().filter_map(|cue| song.pattern(&cue.pattern)).map(|p| u64::from(p.bars)).sum();
+    let played: Vec<&Pattern> = song.setlist.iter().filter_map(|cue| song.pattern(&cue.pattern)).collect();
+    let bars: u64 = played.iter().map(|p| u64::from(p.bars)).fold(0, u64::saturating_add);
+    let beats: u64 = played.iter().map(|p| u64::from(p.bars) * u64::from(p.beats)).fold(0, u64::saturating_add);
     let tempo = u64::from(song.tempo);
-    (bars * 240 > CAP_SECONDS * tempo).then(|| Remark::loose("too-long", format!("the song runs {:.1} seconds ({bars} bar{} at tempo {tempo}), past the {} minute cap", (bars * 240) as f64 / tempo as f64, if bars == 1 { "" } else { "s" }, CAP_SECONDS / 60)))
+    let meter = if beats == bars.saturating_mul(COMMON_TIME.into()) { String::new() } else { format!(", {beats} beats") };
+    (beats.saturating_mul(60) > CAP_SECONDS * tempo).then(|| Remark::loose("too-long", format!("the song runs {:.1} seconds ({bars} bar{}{meter} at tempo {tempo}), past the {} minute cap", beats.saturating_mul(60) as f64 / tempo as f64, if bars == 1 { "" } else { "s" }, CAP_SECONDS / 60)))
 }
 
 fn ghosts(song: &Song) -> Vec<Remark> {
@@ -207,7 +210,7 @@ fn indicted(pattern: &Pattern, charge: &Charge) -> Remark {
 fn solo(song: &Song, pattern: &Pattern, cue: &Cue, lane: &Lane, shifts: &[i8]) -> Result<Solo, Vec<Remark>> {
     let mut notes: Vec<Ring> = lane.notes.iter().map(|n| Ring { at: n.at, end: n.rings_through(pattern.grid), rest: n.pitch.is_none() }).collect();
     notes.sort_by_key(|r| r.at);
-    let mut flourishes: Vec<Flourish> = lane.notes.iter().filter_map(|n| flourish(song.tempo, pattern.grid, n, shifts)).collect();
+    let mut flourishes: Vec<Flourish> = lane.notes.iter().filter_map(|n| flourish(song.tempo, pattern, n, shifts)).collect();
     flourishes.sort_by_key(|f| match f { Flourish::Vibrato { at, .. } | Flourish::Arpeggio { at, .. } => *at });
     let mut heard = Solo { pattern: pattern.name.clone(), lane: lane.name.clone(), line: lane.line, sounding: false, notes, flourishes };
     if heard.voiced() {
@@ -217,7 +220,7 @@ fn solo(song: &Song, pattern: &Pattern, cue: &Cue, lane: &Lane, shifts: &[i8]) -
     Ok(heard)
 }
 
-fn flourish(tempo: u32, grid: u32, note: &Note, shifts: &[i8]) -> Option<Flourish> {
+fn flourish(tempo: u32, pattern: &Pattern, note: &Note, shifts: &[i8]) -> Option<Flourish> {
     let pitch = note.pitch?;
     match note.ornaments.bend.as_ref()? {
         Bend::Vibrato(vib) => {
@@ -230,7 +233,7 @@ fn flourish(tempo: u32, grid: u32, note: &Note, shifts: &[i8]) -> Option<Flouris
             Some(Flourish::Vibrato { at: note.at, hertz: vib.hertz(), delay_ms: vib.delay_ms(), swings })
         }
         Bend::Arpeggio(_) => {
-            let (steps, rate) = render::arp_rate(tempo, grid, note.len);
+            let (steps, rate) = render::arp_rate(tempo, pattern, note.len)?;
             Some(Flourish::Arpeggio { at: note.at, steps, rate })
         }
         Bend::Slide(_) => None,
@@ -254,7 +257,8 @@ fn misheard(e: RenderError, pattern: &Pattern) -> Remark {
     let (code, lane, at) = match &e {
         RenderError::Profile(_) => ("unknown-profile", None, None),
         RenderError::Tempo(_) => ("tempo-out-of-reach", None, None),
-        RenderError::Grid(_) => ("grid-out-of-reach", None, None),
+        RenderError::Grid(_) | RenderError::Meter { .. } => ("grid-out-of-reach", None, None),
+        RenderError::Beats(_) => ("beats-out-of-reach", None, None),
         RenderError::Lane(lane) => ("unknown-lane", Some(lane.clone()), None),
         RenderError::Param { lane, .. } => ("unknown-param", Some(lane.clone()), None),
         RenderError::Volume { lane, .. } => ("no-volume-knob", Some(lane.clone()), None),
@@ -424,6 +428,37 @@ mod tests {
         assert_eq!(overlong(&song(4)).expect("800 seconds is past the cap").message, "the song runs 800.0 seconds (400 bars at tempo 120), past the 10 minute cap");
         let shelved = take("song \"s\" tempo 120\npattern endless bars 4000000000 grid 255\nlane pulse1\n  1.1: C4 x1\npattern ding bars 1 grid 4\nplay\n  ding\n").unwrap();
         assert_eq!(shelved.stats.seconds, 2.0, "an unplayed pattern costs nothing, however long");
+    }
+
+    #[test]
+    fn a_mixed_meter_play_block_runs_each_bar_at_its_own_length() {
+        let heard = take("song \"s\" tempo 120\npattern four bars 1 grid 16\nlane pulse1\n  1: C4 x16\npattern seven bars 1 beats 7 grid 14\nlane pulse1\n  1: G4 x6\n  7: E4 x8 arp 0,4\nplay\n  four\n  seven\n  four +2\n").unwrap();
+        assert_eq!(heard.plays, [0..88_200, 88_200..242_550, 242_550..330_750], "2 s, then 3.5 s, then 2 s");
+        assert_eq!(heard.stats.seconds, 7.5);
+        assert!(heard.samples[88_200..242_550].iter().all(|s| *s != 0), "the seven-beat bar is written full and plays full");
+        let [Flourish::Arpeggio { at, steps, rate }] = &heard.stats.lanes[1].flourishes[..] else { panic!("{:?}", heard.stats.lanes[1]) };
+        assert_eq!((*at, *steps, *rate), (pos(1, 7), 120, 60.0), "eight half-beat slots at 120 are 2 s of arp");
+    }
+
+    #[test]
+    fn the_cap_counts_beats_not_bars() {
+        let song = |beats: u32, plays: usize| Song::parse(&format!("song \"s\" tempo 120\npattern a bars 100 beats {beats} grid 4\nplay\n{}", "  a\n".repeat(plays))).unwrap();
+        assert_eq!(overlong(&song(4, 3)), None);
+        let seven = overlong(&song(7, 2)).expect("1400 beats at 120 is 700 seconds");
+        assert_eq!(seven.message, "the song runs 700.0 seconds (200 bars, 1400 beats at tempo 120), past the 10 minute cap", "200 four-beat bars would have slipped under at 400 s");
+        assert_eq!(overlong(&song(2, 6)), None, "600 short bars are exactly the ten minutes");
+        let vast = refusal("song \"s\" tempo 120\npattern endless bars 4000000000 beats 32 grid 255\nlane pulse1\n  1.1: C4 x1\n");
+        assert_eq!(vast.message, "the song runs 64000000000.0 seconds (4000000000 bars, 128000000000 beats at tempo 120), past the 10 minute cap");
+    }
+
+    #[test]
+    fn a_vast_thirty_two_beat_pattern_on_the_shelf_costs_nothing() {
+        let shelf = "pattern endless bars 4000000000 beats 32 grid 255\nlane pulse1\n  1.1: C4 x9 fade\n  4000000000.1: A4 x60 arp 0,4,7\n";
+        let heard = take(&format!("{DUO}{shelf}play\n  a\n")).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(heard.stats.seconds, 2.0);
+        let late = refusal(&format!("{DUO}{shelf}  4000000000.255: E5 x1 vib 20ct 6hz 2000ms\nplay\n  a\n"));
+        assert_eq!((late.code, late.pattern.as_deref(), late.at), ("vibrato-never-starts", Some("endless"), Some(pos(4_000_000_000, 255))));
+        assert!(late.message.contains("outlasts the note's 62.7 ms"), "a slot of 32 beats over 255 at tempo 120: {}", late.message);
     }
 
     #[test]

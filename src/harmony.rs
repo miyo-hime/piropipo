@@ -1,6 +1,6 @@
 use piropipo::profile::{self, Card, Voice, named};
 use piropipo::render;
-use piropipo::score::{Bend, Lane, Note, Pattern, Position, Song};
+use piropipo::score::{Bend, COMMON_TIME, Lane, Note, Pattern, Position, Song};
 use serde_json::{Value, json};
 
 const SOUR: [(u16, &str); 3] = [(1, "minor 2nd"), (6, "tritone"), (11, "major 7th")];
@@ -39,7 +39,7 @@ pub fn rubs(song: &Song) -> Vec<Rub> {
 }
 
 fn rubs_in(tempo: u32, card: &Card, pattern: &Pattern) -> Vec<Rub> {
-    let mut voices: Vec<(usize, &str, Vec<Held>)> = pattern.lanes.iter().filter_map(|lane| voiced(tempo, pattern.grid, card, lane)).collect();
+    let mut voices: Vec<(usize, &str, Vec<Held>)> = pattern.lanes.iter().filter_map(|lane| voiced(tempo, pattern, card, lane)).collect();
     voices.sort_by_key(|(seat, ..)| *seat);
     let mut found = Vec::new();
     for (i, (_, one, ones)) in voices.iter().enumerate() {
@@ -50,24 +50,28 @@ fn rubs_in(tempo: u32, card: &Card, pattern: &Pattern) -> Vec<Rub> {
 }
 
 fn rub(pattern: &Pattern, [one, other]: [&str; 2], run: &Overlap) -> Option<Rub> {
-    let grid = pattern.grid;
+    let Pattern { beats, grid, .. } = *pattern;
     let slots = run.to - run.from;
-    if !lingers(slots, grid) { return None; }
+    if !lingers(slots, beats, grid) { return None; }
     let interval = sour(run.one.pitch, run.other.pitch)?;
-    let beats = (slots * 4) as f64 / f64::from(grid);
+    let held = (slots * u64::from(beats)) as f64 / f64::from(grid);
     Some(Rub {
         pattern: pattern.name.clone(), lanes: [one.into(), other.into()], pitches: [run.one.pitch, run.other.pitch], arp: [run.one.arp, run.other.arp],
         interval, semitones: run.one.pitch.abs_diff(run.other.pitch), at: Position::from_tick(run.from, grid), end: Position::from_tick(run.to.saturating_sub(1), grid),
-        slots, beats: (beats * 100.0).round() / 100.0, strong: accented(run.from, run.to, grid),
+        slots, beats: (held * 100.0).round() / 100.0, strong: accented(run.from, run.to, beats, grid),
     })
 }
 
 fn sour(a: i16, b: i16) -> Option<&'static str> { SOUR.iter().find(|(class, _)| *class == a.abs_diff(b) % 12).map(|(_, name)| *name) }
 
-fn lingers(slots: u64, grid: u32) -> bool { slots * 16 >= 3 * u64::from(grid) }
+fn lingers(slots: u64, beats: u32, grid: u32) -> bool { slots * 4 * u64::from(beats) >= 3 * u64::from(grid) }
 
-// doubled ticks put beats 1 and 3 of every bar on the multiples of the grid, odd grids included
-fn accented(from: u64, to: u64, grid: u32) -> bool { let grid = u64::from(grid); (2 * from).div_ceil(grid) * grid < 2 * to }
+// doubled ticks put beats 1 and 3 of common time on the multiples of the grid, odd grids included. other meters trust only the downbeat: a 7 could group 2+2+3 or 3+2+2
+fn accented(from: u64, to: u64, beats: u32, grid: u32) -> bool {
+    let halves = if beats == COMMON_TIME { 2 } else { 1 };
+    let grid = u64::from(grid);
+    (halves * from).div_ceil(grid) * grid < halves * to
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Tone { pitch: i16, arp: bool }
@@ -78,18 +82,18 @@ struct Held { from: u64, to: u64, tones: Vec<Tone> }
 #[derive(Debug)]
 struct Overlap { one: Tone, other: Tone, from: u64, to: u64 }
 
-fn voiced<'l>(tempo: u32, grid: u32, card: &Card, lane: &'l Lane) -> Option<(usize, &'l str, Vec<Held>)> {
+fn voiced<'l>(tempo: u32, pattern: &Pattern, card: &Card, lane: &'l Lane) -> Option<(usize, &'l str, Vec<Held>)> {
     let (seat, part) = card.parts.iter().enumerate().find(|(_, p)| p.name == lane.name)?;
     if part.voice == Voice::Noise { return None; }
     let level = part.setup(&lane.params).ok()?.volume;
-    let mut notes: Vec<Held> = lane.notes.iter().filter(|n| n.ornaments.vol.unwrap_or(level) > 0).filter_map(|n| held(tempo, grid, n)).collect();
+    let mut notes: Vec<Held> = lane.notes.iter().filter(|n| n.ornaments.vol.unwrap_or(level) > 0).filter_map(|n| held(tempo, pattern, n)).collect();
     notes.sort_unstable_by_key(|h| h.from);
     Some((seat, lane.name.as_str(), notes))
 }
 
-fn held(tempo: u32, grid: u32, note: &Note) -> Option<Held> {
+fn held(tempo: u32, pattern: &Pattern, note: &Note) -> Option<Held> {
     let pitch = note.pitch?;
-    let from = note.at.tick(grid);
+    let from = note.at.tick(pattern.grid);
     let to = from + u64::from(note.len);
     let written = Tone { pitch: pitch.into(), arp: false };
     match &note.ornaments.bend {
@@ -100,7 +104,7 @@ fn held(tempo: u32, grid: u32, note: &Note) -> Option<Held> {
             Some(Held { from, to, tones })
         }
         Some(Bend::Slide(departure)) => {
-            let (dwells, _) = render::arp_rate(tempo, grid, note.len);
+            let (dwells, _) = render::arp_rate(tempo, pattern, note.len)?;
             let walk = u64::from(pitch.abs_diff(*departure)) * u64::from(note.len);
             let landed = from + (2 * walk + dwells).checked_div(2 * dwells)?;
             (landed < to).then(|| Held { from: landed, to, tones: vec![written] })
@@ -165,8 +169,8 @@ mod tests {
             let rubs = heard(&duo(grid, &format!("  1.1: C4 x{long}\n"), &format!("  1.1: C#4 x{long}\n")));
             assert_eq!(rubs.iter().map(|r| (r.slots, r.beats)).collect::<Vec<_>>(), [(long, beats)], "grid {grid}");
         }
-        assert!(lingers(1, 4) && lingers(1, 3) && lingers(1, 1), "on a coarse grid one slot is already a beat or more");
-        assert!(!lingers(2, 11) && lingers(3, 11));
+        assert!(lingers(1, 4, 4) && lingers(1, 4, 3) && lingers(1, 4, 1), "on a coarse grid one slot is already a beat or more");
+        assert!(!lingers(2, 4, 11) && lingers(3, 4, 11));
     }
 
     #[test]
@@ -235,8 +239,42 @@ mod tests {
     fn a_strong_beat_is_beat_one_or_three_sounding_under_the_rub() {
         let at = |start: &str| heard(&duo(16, &format!("  {start}: C4 x3\n"), &format!("  {start}: C#4 x3\n")))[0].strong;
         assert_eq!(["1.1", "1.2", "1.6", "1.7", "1.9", "1.14", "1.15"].map(at), [true, false, false, true, true, false, true]);
-        assert!(accented(4, 7, 12) && !accented(1, 4, 12), "grid 12 puts beat 3 on slot 7");
-        assert!(accented(1, 2, 3) && !accented(2, 3, 3), "grid 3 puts beat 3 halfway through slot 2");
+        assert!(accented(4, 7, 4, 12) && !accented(1, 4, 4, 12), "grid 12 puts beat 3 on slot 7");
+        assert!(accented(1, 2, 4, 3) && !accented(2, 3, 4, 3), "grid 3 puts beat 3 halfway through slot 2");
+    }
+
+    fn metered(beats: u32, grid: u32, pulse1: &str, pulse2: &str) -> String { format!("song \"s\" tempo 120\npattern p bars 2 beats {beats} grid {grid}\nlane pulse1\n{pulse1}lane pulse2\n{pulse2}") }
+
+    #[test]
+    fn an_odd_meter_trusts_only_its_downbeat_and_common_time_keeps_beat_three() {
+        let at = |beats: u32, start: &str| heard(&metered(beats, 14, &format!("  {start}: C4 x3\n"), &format!("  {start}: C#4 x3\n")))[0].strong;
+        let starts = ["1.1", "1.5", "1.8", "1.13"];
+        assert_eq!(starts.map(|s| at(4, s)), [true, false, true, true], "grid 14 in common time puts beat 3 on slot 8");
+        assert_eq!(starts.map(|s| at(7, s)), [true, false, false, true], "a seven-beat bar has no beat 3 to lean on, only the barline at 2.1");
+        assert!(!accented(7, 10, 7, 14) && accented(12, 15, 7, 14) && accented(0, 1, 3, 9) && !accented(3, 9, 3, 9));
+    }
+
+    #[test]
+    fn three_quarters_of_a_beat_is_measured_in_the_patterns_own_beats() {
+        let rub = |beats: u32, len: u32| heard(&metered(beats, 14, &format!("  1.1: C4 x{len}\n"), &format!("  1.1: C#4 x{len}\n"))).iter().map(|r| (r.slots, r.beats)).collect::<Vec<_>>();
+        assert_eq!((rub(4, 2), rub(4, 3)), (Vec::new(), vec![(3, 0.86)]), "in common time a 14th of a bar is under 3/4 of a beat");
+        assert_eq!((rub(7, 1), rub(7, 2)), (Vec::new(), vec![(2, 1.0)]), "at seven beats to fourteen slots, two slots are a whole beat");
+        assert!(lingers(3, 32, 128) && !lingers(2, 32, 128) && lingers(1, 1, 1));
+    }
+
+    #[test]
+    fn a_slide_walks_in_seconds_so_a_longer_bar_lands_it_sooner() {
+        let landed = |beats: u32, len: u32| heard(&metered(beats, 16, &format!("  1.1: C#5 x{len} from C#3\n"), &format!("  1.1: C4 x{len}\n"))).iter().map(|r| (r.at, r.slots)).collect::<Vec<_>>();
+        assert_eq!(landed(4, 8), [(pos(1, 4), 5)]);
+        assert_eq!(landed(7, 8), [(pos(1, 3), 6)], "two octaves of walk take about 0.4 s, under two slots of a seven-beat bar");
+        assert_eq!((landed(4, 4), landed(7, 4)), (Vec::new(), vec![(pos(1, 3), 2)]), "the same four-slot note leaves a held clash only in the longer bar");
+    }
+
+    #[test]
+    fn a_vast_thirty_two_beat_pattern_is_swept_note_by_note_too() {
+        let vast = song("song \"s\" tempo 120\npattern vast bars 4000000000 beats 32 grid 255\nlane pulse1\n  1.1: C4 x255\n  4000000000.1: C4 x255 from E4\nlane pulse2\n  1.1: E4 x255\n  4000000000.1: C#4 x255\n");
+        let rubs = rubs_in(120, profile::card(None).unwrap(), &vast.patterns[0]);
+        assert_eq!(rubs.iter().map(|r| (r.at, r.slots, r.beats, r.strong)).collect::<Vec<_>>(), [(pos(4_000_000_000, 2), 254, 31.87, false)], "the slide lands one slot in, past the last downbeat");
     }
 
     #[test]

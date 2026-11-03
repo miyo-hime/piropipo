@@ -1,6 +1,6 @@
 use crate::surface::{emit, land_beside, publish, read_source};
 use piropipo::render::{RenderError, transposed};
-use piropipo::score::{Cue, Lane, Note, Pattern, Position, ScoreError, Song};
+use piropipo::score::{COMMON_TIME, Cue, Lane, Note, Pattern, Position, ScoreError, Song};
 use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -192,7 +192,7 @@ fn window<'s>(song: &'s Song, first: u64, asked: u64) -> Result<(Vec<Sheet<'s>>,
         let local = |bar: u64| u32::try_from(bar - play.first + 1).expect("a bar inside a play fits its pattern's u32 bar count");
         let (from, to) = (local(first.max(play.first)), local(last.min(play.last())));
         let entire = (from, to) == (1, play.pattern.bars);
-        let label = if entire { measures(play.pattern) } else { format!("{} of {}, grid {}", bars(from.into(), to.into()), play.pattern.bars, play.pattern.grid) };
+        let label = if entire { measures(play.pattern) } else { format!("{} of {}, {}grid {}", bars(from.into(), to.into()), play.pattern.bars, meter(play.pattern), play.pattern.grid) };
         let downbeat = play.first + u64::from(from) - 1;
         let pattern = if entire { heard } else { Cow::Owned(excerpt(&heard, from, to)) };
         sheets.push(Sheet { name: format!("{}{}", play.cue.pattern, shifted(play.cue.shift)), label, pattern, first: downbeat, lead: usize::try_from(downbeat - first).unwrap_or(usize::MAX) });
@@ -213,10 +213,12 @@ fn excerpt(pattern: &Pattern, from: u32, to: u32) -> Pattern {
         }).collect();
         Lane { name: lane.name.clone(), params: lane.params.clone(), notes, line: lane.line }
     }).collect();
-    Pattern { name: pattern.name.clone(), bars: to - from + 1, grid: pattern.grid, lanes, line: pattern.line }
+    Pattern { name: pattern.name.clone(), bars: to - from + 1, beats: pattern.beats, grid: pattern.grid, lanes, line: pattern.line }
 }
 
-fn measures(p: &Pattern) -> String { format!("{} bar{}, grid {}", p.bars, if p.bars == 1 { "" } else { "s" }, p.grid) }
+fn measures(p: &Pattern) -> String { format!("{} bar{}, {}grid {}", p.bars, if p.bars == 1 { "" } else { "s" }, meter(p), p.grid) }
+
+fn meter(p: &Pattern) -> String { if p.beats == COMMON_TIME { String::new() } else { format!("beats {}, ", p.beats) } }
 
 fn span(first: u64, last: u64) -> String { if first == last { first.to_string() } else { format!("{first}-{last}") } }
 
@@ -290,11 +292,11 @@ fn roll(song: &Song, sheets: &[Sheet], crop: Option<&str>) -> Result<Canvas, Str
         let x = canvas.write(MARGIN, y, &sheet.name, INK, CHALK);
         canvas.write(x + 12, y, &sheet.label, INK, SMUDGE);
         y += LINE + 4;
-        let (pattern, bars, grid) = (&sheet.pattern, sheet.pattern.bars as usize, sheet.pattern.grid as usize);
+        let (pattern, bars, meter, grid) = (&sheet.pattern, sheet.pattern.bars as usize, sheet.pattern.beats as usize, sheet.pattern.grid as usize);
         let left = left + sheet.lead * bar_px;
         let span = bars * bar_px;
         let at = |tick: usize| left + tick * bar_px / grid;
-        let beats: Vec<usize> = if grid.is_multiple_of(4) { (0..bars * 4).map(|b| b * grid / 4).filter(|t| !t.is_multiple_of(grid)).collect() } else { Vec::new() };
+        let beats: Vec<usize> = if grid.is_multiple_of(meter) { (0..bars * meter).map(|b| b * grid / meter).filter(|t| !t.is_multiple_of(grid)).collect() } else { Vec::new() };
         for bar in 0..bars { canvas.write(at(bar * grid) + 6, y, &(sheet.first + bar as u64).to_string(), INK, CHALK); }
         if bar_px / grid >= 4 { for tick in 0..bars * grid { canvas.fill(at(tick), y + RULER - 5, 1, 5, SMUDGE); } }
         for &tick in &beats { canvas.fill(at(tick), y + RULER - 10, 1, 10, SMUDGE); }
@@ -510,6 +512,31 @@ mod tests {
         assert_eq!(runs.iter().map(|r| (r.0 - left, r.1 - left)).collect::<Vec<_>>(), [(1, 127), (129, 255), (257, 319)], "two seamed C4s, one short C5, then a written rest drawn as nothing");
         assert_eq!(runs[0].2, runs[1].2);
         assert_eq!(runs[0].2 - runs[2].2, 12 * SEMITONE, "an octave up should sit twelve semitone steps higher");
+    }
+
+    fn beatlines(text: &str) -> Vec<usize> {
+        let canvas = rolled(text);
+        let left = canvas.width - MARGIN - 512;
+        let staff = (0..canvas.height).find(|&y| pixel(&canvas, left + 1, y) == STAFF).expect("the band should be drawn");
+        (left..left + 512).filter(|&x| pixel(&canvas, x, staff) == BEATLINE).map(|x| x - left).collect()
+    }
+
+    #[test]
+    fn the_ruler_marks_the_beats_the_bar_really_has() {
+        assert_eq!(beatlines("song \"t\" tempo 120\npattern p bars 1 grid 16\nlane pulse1\n"), [128, 256, 384]);
+        assert_eq!(beatlines("song \"t\" tempo 120\npattern p bars 1 beats 7 grid 14\nlane pulse1\n"), [73, 146, 219, 292, 365, 438]);
+        assert_eq!(beatlines("song \"t\" tempo 120\npattern p bars 1 beats 3 grid 12\nlane pulse1\n"), [170, 341]);
+        assert_eq!(beatlines("song \"t\" tempo 120\npattern p bars 1 beats 7 grid 16\nlane pulse1\n"), Vec::<usize>::new(), "sixteen slots don't land on seven beats, so no beat is drawn, same as grid 6 in common time");
+    }
+
+    #[test]
+    fn an_odd_meter_says_so_on_every_label_and_common_time_stays_quiet() {
+        let song = Song::parse("song \"t\" tempo 120\npattern verse bars 2 beats 7 grid 14\nlane pulse1\n  1.1: C4 x28\npattern chorus bars 2 grid 16\nplay\n  verse\n  chorus\n").unwrap();
+        assert_eq!(whole(&song).iter().map(|s| s.label.as_str()).collect::<Vec<_>>(), ["2 bars, beats 7, grid 14", "2 bars, grid 16"]);
+        let (sheets, _) = cropped(&song, &Crop::Bars(2, 3));
+        assert_eq!(sheets.iter().map(|s| s.label.as_str()).collect::<Vec<_>>(), ["bar 2 of 2, beats 7, grid 14", "bar 1 of 2, grid 16"]);
+        assert_eq!(sheets[0].pattern.beats, 7, "an excerpt keeps its meter");
+        assert_eq!(cropped(&song, &Crop::Patterns(vec!["verse".into()])).0[0].label, "2 bars, beats 7, grid 14, plays at song bars 1-2");
     }
 
     #[test]

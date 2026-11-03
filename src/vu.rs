@@ -20,12 +20,12 @@ impl Level {
 pub struct Bar { pub bar: u32, pub at: f64, pub level: Level }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Section { pub pattern: String, pub play: usize, pub plays: usize, pub shift: i8, pub at: f64, pub level: Level, pub bars: Vec<Bar> }
+pub struct Section { pub pattern: String, pub play: usize, pub plays: usize, pub shift: i8, pub beats: u32, pub at: f64, pub level: Level, pub bars: Vec<Bar> }
 
 impl Section {
     fn json(&self) -> Value {
         let bars: Vec<Value> = self.bars.iter().map(|b| json!({ "bar": b.bar, "start_seconds": b.at, "rms_dbfs": b.level.rms, "peak_dbfs": b.level.peak })).collect();
-        json!({ "pattern": self.pattern, "play": self.play, "transpose": self.shift, "start_seconds": self.at, "rms_dbfs": self.level.rms, "peak_dbfs": self.level.peak, "bars": bars })
+        json!({ "pattern": self.pattern, "play": self.play, "transpose": self.shift, "beats": self.beats, "start_seconds": self.at, "rms_dbfs": self.level.rms, "peak_dbfs": self.level.peak, "bars": bars })
     }
 
     fn label(&self) -> String {
@@ -86,7 +86,7 @@ pub fn read(song: &Song, samples: &[i16], plays: &[Range<usize>]) -> Reading {
         let play = cues.iter().take(i + 1).filter(|c| c.0.name == pattern.name).count();
         let plays = cues.iter().filter(|c| c.0.name == pattern.name).count();
         let bars = (0..pattern.bars).map(|b| { let (from, to) = (edge(span, pattern.bars, b), edge(span, pattern.bars, b + 1)); Bar { bar: b + 1, at: seconds(from), level: Level::of(samples.get(from..to).unwrap_or_default()) } }).collect();
-        Section { pattern: pattern.name.clone(), play, plays, shift, at: seconds(span.start), level: Level::of(samples.get(span.clone()).unwrap_or_default()), bars }
+        Section { pattern: pattern.name.clone(), play, plays, shift, beats: pattern.beats, at: seconds(span.start), level: Level::of(samples.get(span.clone()).unwrap_or_default()), bars }
     }).collect();
     let mut turnouts: Vec<Turnout> = Vec::new();
     for &(pattern, _, _) in &cues { if !turnouts.iter().any(|t| t.pattern == pattern.name) { turnouts.push(turnout(song, pattern)); } }
@@ -212,13 +212,22 @@ mod tests {
     #[test]
     fn the_reading_speaks_json_by_section_and_by_lane() {
         let json = rounds().json();
-        assert_eq!(json["sections"][2], json!({ "pattern": "a", "play": 2, "transpose": 2, "start_seconds": 3.0, "rms_dbfs": 0.0, "peak_dbfs": 0.0, "bars": [
+        assert_eq!(json["sections"][2], json!({ "pattern": "a", "play": 2, "transpose": 2, "beats": 4, "start_seconds": 3.0, "rms_dbfs": 0.0, "peak_dbfs": 0.0, "bars": [
             { "bar": 1, "start_seconds": 3.0, "rms_dbfs": 0.0, "peak_dbfs": 0.0 },
             { "bar": 2, "start_seconds": 4.0, "rms_dbfs": 0.0, "peak_dbfs": 0.0 },
         ] }));
         assert_eq!(json["sections"][0]["bars"][1], json!({ "bar": 2, "start_seconds": 1.0, "rms_dbfs": null, "peak_dbfs": null }));
         assert_eq!(json["sounding_percent"], json!({ "song": { "pulse1": 90.0, "noise": 20.0 }, "patterns": { "a": { "pulse1": 100.0 }, "b": { "pulse1": 50.0, "noise": 100.0 } } }));
         assert!(json["rms_dbfs"].is_f64());
+    }
+
+    #[test]
+    fn each_section_says_its_meter_and_splits_its_own_bars_evenly() {
+        let heard = take("song \"s\" tempo 120\npattern four bars 1 grid 4\nlane pulse1\n  1: C4 x4\npattern seven bars 2 beats 7 grid 14\nlane pulse1\n  1.1: C4 x14\nplay\n  four\n  seven\n").unwrap();
+        let json = read(&heard.song, &heard.samples, &heard.plays).json();
+        assert_eq!(json["sections"].as_array().unwrap().iter().map(|s| s["beats"].clone()).collect::<Vec<_>>(), [json!(4), json!(7)]);
+        assert_eq!(json["sections"][1]["bars"].as_array().unwrap().iter().map(|b| b["start_seconds"].clone()).collect::<Vec<_>>(), [json!(2.0), json!(5.5)], "a seven-beat bar at 120 lasts 3.5 s");
+        assert_eq!(json["sections"][0].as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(), ["pattern", "play", "transpose", "beats", "start_seconds", "rms_dbfs", "peak_dbfs", "bars"]);
     }
 
     #[test]

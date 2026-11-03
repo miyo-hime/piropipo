@@ -95,6 +95,12 @@ mod tests {
     }
 
     #[test]
+    fn strict_counts_slots_whatever_the_meter() {
+        let Err(errors) = strict("song \"s\" tempo 120\npattern p bars 2 beats 7 grid 14\nlane pulse1\n  1.1: C4 x7\n  2.1: D4 x14\n") else { panic!("half a bar is unwritten") };
+        assert_eq!(errors.iter().map(|e| e.message.as_str()).collect::<Vec<_>>(), ["slots 1.8 through 1.14 are unwritten; nothing plays or rests there, so write notes or a rest like `1.8: - x7`"]);
+    }
+
+    #[test]
     fn without_strict_the_gappy_score_still_passes() {
         assert!(inspect(&format!("{HEAD}  1.1: C4 x2\n"), false).is_ok());
     }

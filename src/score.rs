@@ -5,6 +5,10 @@ const MARKS: [&str; 6] = ["vib", "arp", "from", "duty", "vol", "fade"];
 
 const BENDS: [&str; 3] = ["vib", "arp", "from"];
 
+pub const COMMON_TIME: u32 = 4;
+
+pub const MOST_BEATS: u32 = 32;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Position { pub bar: u32, pub slot: u32 }
 
@@ -54,7 +58,7 @@ impl Vibrato {
 pub struct Lane { pub name: String, pub params: Vec<(String, String)>, pub notes: Vec<Note>, pub line: usize }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Pattern { pub name: String, pub bars: u32, pub grid: u32, pub lanes: Vec<Lane>, pub line: usize }
+pub struct Pattern { pub name: String, pub bars: u32, pub beats: u32, pub grid: u32, pub lanes: Vec<Lane>, pub line: usize }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cue { pub pattern: String, pub shift: i8, pub line: usize }
@@ -101,6 +105,7 @@ pub enum Fault {
     RepeatedParam(String),
     NoValue(String),
     NotCount { key: String, value: String },
+    BeatsUnreachable(u32),
     SecondPattern { first: usize },
     LaneOutsidePattern,
     NoteOutsideLane,
@@ -157,6 +162,7 @@ impl Fault {
             Fault::RepeatedParam(_) => "repeated-param",
             Fault::NoValue(_) => "no-value",
             Fault::NotCount { .. } => "not-a-count",
+            Fault::BeatsUnreachable(_) => "beats-out-of-reach",
             Fault::SecondPattern { .. } => "second-pattern",
             Fault::LaneOutsidePattern => "lane-outside-pattern",
             Fault::NoteOutsideLane => "note-outside-lane",
@@ -207,10 +213,11 @@ impl fmt::Display for Fault {
             Fault::UnclosedTitle => write!(f, "the song title's opening quote never closes"),
             Fault::NoName(directive) => write!(f, "`{directive}` needs a name first, like `{}`", if *directive == "lane" { "lane pulse1" } else { "pattern main bars 2 grid 16" }),
             Fault::MissingParam { directive, key } => write!(f, "`{directive}` is missing `{key} N` ({})", gloss(key)),
-            Fault::UnknownParam { directive, key, takes } => write!(f, "`{directive}` doesn't take `{key}`; it takes {}", takes.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(" and ")),
+            Fault::UnknownParam { directive, key, takes } => write!(f, "`{directive}` doesn't take `{key}`; it takes {}", profile::roster(takes.iter().copied(), "and")),
             Fault::RepeatedParam(key) => write!(f, "`{key}` is set twice on this line"),
             Fault::NoValue(key) => write!(f, "`{key}` has no value after it"),
             Fault::NotCount { key, value } => write!(f, "`{key}` wants a whole number above 0, got `{value}`"),
+            Fault::BeatsUnreachable(beats) => write!(f, "beats {beats} is out of reach; keep it between 1 and {MOST_BEATS} beats per bar"),
             Fault::SecondPattern { first } => write!(f, "a pattern with this name already exists on line {first}; pattern names are unique"),
             Fault::LaneOutsidePattern => write!(f, "a lane has to sit inside a pattern; put a `pattern` line above it"),
             Fault::NoteOutsideLane => write!(f, "this note isn't inside a lane; put a `lane` line above it"),
@@ -318,7 +325,8 @@ impl Copyist {
     fn pattern(&mut self, line: usize, rest: &str) {
         let tokens: Vec<&str> = rest.split_whitespace().collect();
         let (name, tokens) = match tokens.split_first() {
-            Some((name, tail)) if !matches!(*name, "bars" | "grid") => (*name, tail),
+            // `beats` stays a legal pattern name from before meters existed; it's only the key when a count follows it
+            Some((name, tail)) if !matches!(*name, "bars" | "grid") && !(*name == "beats" && tail.first().is_some_and(|t| whole(t).is_some())) => (*name, tail),
             _ => ("", &tokens[..]),
         };
         self.pattern = (!name.is_empty()).then(|| name.to_owned());
@@ -328,12 +336,14 @@ impl Copyist {
         let mut faults = Vec::new();
         if name.is_empty() { faults.push(Fault::NoName("pattern")); }
         else if let Some(twin) = self.sheets.iter().find(|s| s.pattern.name == name) { faults.push(Fault::SecondPattern { first: twin.pattern.line }); }
-        let [bars, grid] = fields("pattern", tokens, &["bars", "grid"], &mut faults);
+        let [bars, beats, grid] = fields("pattern", tokens, &["bars", "beats", "grid"], &mut faults);
         let bars = required("pattern", "bars", bars, &mut faults);
+        let beats = beats.map_or(Some(COMMON_TIME), |value| counted("beats", value, &mut faults));
+        if let Some(beats) = beats.filter(|b| *b > MOST_BEATS) { faults.push(Fault::BeatsUnreachable(beats)); }
         let grid = required("pattern", "grid", grid, &mut faults);
         for fault in faults { self.blame(line, None, fault); }
         let sound = bars.is_some() && grid.is_some();
-        self.sheets.push(Sheet { pattern: Pattern { name: name.into(), bars: bars.unwrap_or(0), grid: grid.unwrap_or(0), lanes: Vec::new(), line }, sound });
+        self.sheets.push(Sheet { pattern: Pattern { name: name.into(), bars: bars.unwrap_or(0), beats: beats.unwrap_or(COMMON_TIME), grid: grid.unwrap_or(0), lanes: Vec::new(), line }, sound });
     }
 
     fn lane(&mut self, line: usize, rest: &str) {
@@ -470,6 +480,10 @@ fn fields<'t, const N: usize>(directive: &'static str, tokens: &[&'t str], keys:
 
 fn required(directive: &'static str, key: &'static str, value: Option<&str>, faults: &mut Vec<Fault>) -> Option<u32> {
     let Some(value) = value else { faults.push(Fault::MissingParam { directive, key }); return None };
+    counted(key, value, faults)
+}
+
+fn counted(key: &str, value: &str, faults: &mut Vec<Fault>) -> Option<u32> {
     let count = whole(value).filter(|n| *n > 0);
     if count.is_none() { faults.push(Fault::NotCount { key: key.into(), value: value.into() }); }
     count
@@ -735,6 +749,38 @@ mod tests {
             Fault::SecondPattern { first: 2 },
         ]);
         assert_eq!(faults("song \"t\" tempo 90\nlane pulse1\n  1: C4 x1\npattern a bars 1 grid 4\n  1: C4 x1\n  2: C4 x1\n"), [Fault::LaneOutsidePattern, Fault::NoteOutsideLane]);
+    }
+
+    #[test]
+    fn beats_sits_between_bars_and_grid_and_defaults_to_common_time() {
+        let song = Song::parse("song \"t\" tempo 120\npattern verse bars 2 beats 7 grid 14\npattern chorus bars 1 grid 16\npattern bridge grid 12 beats 3 bars 4\n").unwrap();
+        assert_eq!(song.patterns.iter().map(|p| (p.name.as_str(), p.bars, p.beats, p.grid)).collect::<Vec<_>>(), [("verse", 2, 7, 14), ("chorus", 1, 4, 16), ("bridge", 4, 3, 12)]);
+        assert_eq!(Song::parse("song \"t\" tempo 120\npattern p bars 1 beats 4 grid 16\n").unwrap().patterns, Song::parse("song \"t\" tempo 120\npattern p bars 1 grid 16\n").unwrap().patterns, "an explicit beats 4 is the pattern the default writes");
+        assert_eq!(Song::parse("song \"t\" tempo 120\npattern p bars 1 beats 32 grid 64\npattern q bars 1 beats 1 grid 1\n").unwrap().patterns.iter().map(|p| p.beats).collect::<Vec<_>>(), [32, 1]);
+    }
+
+    #[test]
+    fn beats_out_of_reach_are_refused_at_the_pattern() {
+        let refused = |beats: &str| Song::parse(&format!("song \"t\" tempo 120\npattern verse bars 2 beats {beats} grid 14\nlane pulse1\n  1.1: C4 x1\n")).unwrap_err();
+        assert_eq!(refused("0").iter().map(|e| e.fault.clone()).collect::<Vec<_>>(), [Fault::NotCount { key: "beats".into(), value: "0".into() }]);
+        assert_eq!(refused("33").iter().map(|e| e.fault.clone()).collect::<Vec<_>>(), [Fault::BeatsUnreachable(33)]);
+        assert_eq!(refused("seven").iter().map(|e| e.fault.clone()).collect::<Vec<_>>(), [Fault::NotCount { key: "beats".into(), value: "seven".into() }]);
+        assert_eq!(refused("7.5")[0].fault, Fault::NotCount { key: "beats".into(), value: "7.5".into() });
+        assert_eq!(refused("33")[0].to_string(), "line 2, pattern verse: beats 33 is out of reach; keep it between 1 and 32 beats per bar");
+        assert_eq!(refused("0")[0].to_string(), "line 2, pattern verse: `beats` wants a whole number above 0, got `0`");
+        assert_eq!(Fault::BeatsUnreachable(33).code(), "beats-out-of-reach");
+        assert_eq!(faults("song \"t\" tempo 120\npattern p bars 1 beats 3 grid 4 beats 5\n"), [Fault::RepeatedParam("beats".into())]);
+        assert_eq!(faults("song \"t\" tempo 120\npattern p bars 1 beats\n"), [Fault::NoValue("beats".into()), Fault::MissingParam { directive: "pattern", key: "grid" }]);
+    }
+
+    #[test]
+    fn a_pattern_named_beats_still_parses_and_a_forgotten_name_is_still_caught() {
+        let named = Song::parse("song \"t\" tempo 120\npattern beats bars 2 grid 16\nlane noise\n  1.1: C4 x1\npattern fills bars 1 grid 16\nplay\n  beats\n  fills\n").unwrap();
+        assert_eq!((named.patterns[0].name.as_str(), named.patterns[0].beats), ("beats", 4), "a file from before meters keeps its drum pattern");
+        assert_eq!(Song::parse("song \"t\" tempo 120\npattern beats beats 7 bars 1 grid 14\n").unwrap().patterns[0].beats, 7);
+        assert_eq!(faults("song \"t\" tempo 120\npattern beats 7 bars 1 grid 14\n"), [Fault::NoName("pattern")]);
+        let said = Song::parse("song \"t\" tempo 120\npattern p bars 1 meter 7 grid 14\n").unwrap_err()[0].to_string();
+        assert_eq!(said, "line 2, pattern p: `pattern` doesn't take `meter`; it takes `bars`, `beats`, and `grid`");
     }
 
     #[test]
