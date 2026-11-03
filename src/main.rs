@@ -29,6 +29,8 @@ enum Verb {
 }
 
 fn main() {
+    // rust ships SIGPIPE ignored; restore the unix default so piping into head doesn't panic
+    #[cfg(unix)] unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL); }
     let cli = Cli::parse();
     let played = match cli.verb {
         Verb::Track(args) => track::run(args, cli.human),

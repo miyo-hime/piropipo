@@ -351,6 +351,7 @@ dependencies = [
  "clap",
  "ffmml",
  "hound",
+ "libc",
  "png",
  "serde_json",
  "sfxr",

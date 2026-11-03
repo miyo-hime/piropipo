@@ -15,3 +15,6 @@ hound = "3.5.1"
 png = "0.18.1"
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 sfxr = "0.1.4"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
