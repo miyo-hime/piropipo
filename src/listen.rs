@@ -1,3 +1,4 @@
+use crate::events::{self, Strike};
 use crate::harmony::{self, Rub};
 use crate::surface;
 use crate::vu::{self, Reading};
@@ -105,7 +106,7 @@ impl Stats {
     }
 }
 
-pub struct Take { pub samples: Vec<i16>, pub stats: Stats, pub warnings: Vec<Remark>, pub rubs: Vec<Rub>, pub song: Song, pub plays: Vec<Range<usize>> }
+pub struct Take { pub samples: Vec<i16>, pub stats: Stats, pub warnings: Vec<Remark>, pub rubs: Vec<Rub>, pub song: Song, pub plays: Vec<Range<usize>>, pub strikes: Option<Vec<Strike>> }
 
 pub fn read(input: &str) -> Result<String, Vec<Remark>> {
     surface::read_source(input).map(|(text, _)| text).map_err(|e| vec![Remark::loose("unreadable-input", format!("can't read {input}: {e}"))])
@@ -134,7 +135,7 @@ pub fn take(text: &str) -> Result<Take, Vec<Remark>> {
     let stats = Stats { seconds: round(samples.len() as f64 / f64::from(SAMPLE_RATE), 3), peak_dbfs: peak_dbfs(&samples), saturated: saturated(&samples), lanes, gauges: None };
     let mut warnings: Vec<Remark> = stats.lanes.iter().filter_map(hush).collect();
     if stats.saturated > 0 { warnings.push(Remark::loose("saturation", format!("{} sample{} sit at full scale; the mix is hitting the rail and may be clipping", stats.saturated, if stats.saturated == 1 { "" } else { "s" }))); }
-    Ok(Take { samples, stats, warnings, rubs: harmony::rubs(&song), song, plays })
+    Ok(Take { samples, stats, warnings, rubs: harmony::rubs(&song), song, plays, strikes: None })
 }
 
 pub fn answer(verb: &str, human: bool, detail: Detail, played: Result<(Option<PathBuf>, Take), Vec<Remark>>) -> Result<(), Box<dyn std::error::Error>> {
@@ -144,9 +145,11 @@ pub fn answer(verb: &str, human: bool, detail: Detail, played: Result<(Option<Pa
             let stats = if detail == Detail::Headline { take.stats.headline() } else { take.stats.json() };
             let mut envelope = json!({ "ok": true, "verb": verb, "output": output.as_ref().map(|p| p.display().to_string()), "stats": stats, "warnings": take.warnings.iter().map(Remark::json).collect::<Vec<_>>() });
             if detail == Detail::Everything { envelope["harmony"] = harmony::json(&take.rubs); }
+            if let Some(strikes) = &take.strikes { envelope["events"] = events::json(strikes); }
             envelope["errors"] = json!([]);
             let mut told = tell(output.as_deref(), &take.stats, detail, &take.warnings);
             if detail == Detail::Everything { told = format!("{told}\n{}", harmony::tell(&take.rubs)); }
+            if let Some(strikes) = &take.strikes { told = format!("{told}\n{}", events::tell(strikes)); }
             surface::emit(human, envelope, &told);
             Ok(())
         }

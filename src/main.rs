@@ -1,6 +1,7 @@
 use clap::Parser;
 
 mod check;
+mod events;
 mod harmony;
 mod listen;
 mod roll;

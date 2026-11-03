@@ -156,6 +156,11 @@ pub fn arp_rate(tempo: u32, pattern: &Pattern, len: u32) -> Option<(u64, f64)> {
     Some((count, rate(tempo, staff.grid, units, count)))
 }
 
+pub fn sample_in(tempo: u32, pattern: &Pattern, slots: u64) -> Option<u64> {
+    let staff = staff(pattern.beats, pattern.grid).ok().filter(|_| (1..=255).contains(&tempo))?;
+    u64::try_from(sample_at(tempo, staff.grid, slots.checked_mul(staff.unit)?)).ok()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Staff { grid: u32, unit: u64 }
 
