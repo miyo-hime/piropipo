@@ -99,6 +99,12 @@ fn file<T: PartialEq>(book: &mut Vec<T>, stencil: T) -> Option<usize> {
     Some(book.len() - 1)
 }
 
+fn etch(stencils: &mut Stencils, plate: &mut Plate, fade: Vec<u8>) -> Option<String> {
+    let n = file(&mut stencils.fades, fade)?;
+    plate.entry(("v", n)).or_insert_with(|| format!("@v{n} = {{{}}}", stencils.fades.get(n).map_or(String::new(), |f| f.iter().map(u8::to_string).collect::<Vec<_>>().join(", "))));
+    Some(format!("@v{n}"))
+}
+
 pub fn pattern(song: &Song, pattern: &Pattern) -> Result<Vec<i16>, RenderError> { perform(&transcribe(song, pattern)?) }
 
 pub fn pattern_with(song: &Song, pattern: &Pattern, stencils: &mut Stencils) -> Result<Vec<i16>, RenderError> { perform(&engrave(song, pattern, stencils)?) }
@@ -183,12 +189,12 @@ fn line(tempo: u32, pattern: &Pattern, part: &Part, stencils: &mut Stencils, pla
         let leveled = vol.is_some() || *fade;
         if i == 0 && !leveled { words.push(format!("v{volume}")); }
         if let Some(tint) = tint { words.push(format!("@{tint}")); }
-        if *fade {
-            let n = file(&mut stencils.fades, fall(vol.unwrap_or(volume), frames(tempo, grid, start, end))).ok_or_else(|| snag(Flaw::Crowded("fade")))?;
-            plate.entry(("v", n)).or_insert_with(|| format!("@v{n} = {{{}}}", stencils.fades.get(n).map_or(String::new(), |f| f.iter().map(u8::to_string).collect::<Vec<_>>().join(", "))));
-            words.push(format!("@v{n}"));
-        } else if let Some(vol) = vol {
-            words.push(format!("v{vol}"));
+        let stepped = matches!(bend, Some(Bend::Arpeggio(_) | Bend::Slide(_)));
+        let curve = if *fade { fall(vol.unwrap_or(volume), frames(tempo, grid, start, end)) } else { Vec::new() };
+        match (*fade, vol) {
+            (true, _) if !stepped => words.push(etch(stencils, plate, curve.clone()).ok_or_else(|| snag(Flaw::Crowded("fade")))?),
+            (false, Some(vol)) => words.push(format!("v{vol}")),
+            _ => {}
         }
         match bend {
             Some(Bend::Vibrato(vib)) => {
@@ -199,20 +205,29 @@ fn line(tempo: u32, pattern: &Pattern, part: &Part, stencils: &mut Stencils, pla
                 words.extend([format!("MP{n}"), format!("o{octave}"), tie(&letter, grid, end - start), "MPOF".to_owned()]);
             }
             Some(Bend::Arpeggio(offsets)) => {
-                for (units, offset) in steps(tempo, grid, note.len).into_iter().zip(offsets.iter().cycle()) {
+                let steps = steps(tempo, grid, note.len);
+                let mut levels: Vec<u8> = remnants(&curve, tempo, grid, start, &steps).iter().filter_map(|r| r.first().copied()).collect();
+                let silence = levels.pop().map(|_| Some("v0".to_owned()));
+                let mut dynamics = dynamics(levels).chain(silence);
+                for (&units, offset) in steps.iter().zip(offsets.iter().cycle()) {
                     let (octave, letter) = spell(u8::try_from(i16::from(pitch) + offset).unwrap_or(u8::MAX))?;
+                    words.extend(dynamics.next().flatten());
                     words.extend([format!("o{octave}"), tie(&letter, lattice(grid), units)]);
                 }
             }
             Some(Bend::Slide(from)) => {
-                let semitones = u16::from(pitch.abs_diff(*from));
+                let semitones = usize::from(pitch.abs_diff(*from));
                 let steps = steps(tempo, grid, note.len);
-                let (walk, hold) = steps.split_at(usize::from(semitones));
+                let (walk, hold) = steps.split_at(semitones);
+                let remnants = remnants(&curve, tempo, grid, start, &steps);
+                let mut dynamics = dynamics(remnants.iter().take(semitones).filter_map(|r| r.first().copied()));
                 let rungs = if *from < pitch { (*from..pitch).collect::<Vec<_>>() } else { (pitch + 1..=*from).rev().collect() };
                 for (&units, rung) in walk.iter().zip(rungs) {
                     let (octave, letter) = spell(rung)?;
+                    words.extend(dynamics.next().flatten());
                     words.extend([format!("o{octave}"), tie(&letter, lattice(grid), units)]);
                 }
+                if let Some(tail) = remnants.get(semitones) { words.push(etch(stencils, plate, tail.to_vec()).ok_or_else(|| snag(Flaw::Crowded("fade")))?); }
                 words.extend([format!("o{octave}"), tie(&letter, lattice(grid), hold.iter().sum())]);
             }
             None => words.extend([format!("o{octave}"), tie(&letter, grid, end - start)]),
@@ -236,9 +251,27 @@ fn frames(tempo: u32, grid: u32, start: u64, end: u64) -> u64 { u64::try_from((s
 
 fn frames_in(tempo: u32, grid: u32, start: u64, len: u32) -> u64 { frames(tempo, grid, start, start + u64::from(len)) }
 
+// one frame makes `last` zero and divides by it, so a slide's hold slices its note's curve instead of calling this again
 fn fall(level: u8, frames: u64) -> Vec<u8> {
     let last = frames - 1;
     (0..frames).map(|k| u8::try_from((2 * u64::from(level) * (last - k) + last) / (2 * last)).unwrap_or(level)).collect()
+}
+
+// floored, never `frames()`: a step starting 0.8 frames in is still living in frame 0
+fn remnants<'c>(curve: &'c [u8], tempo: u32, grid: u32, start: u64, steps: &[u64]) -> Vec<&'c [u8]> {
+    let Some(last) = curve.len().checked_sub(1) else { return Vec::new() };
+    let lattice = lattice(grid);
+    let origin = start * u64::from(lattice / grid);
+    let downbeat = sample_at(tempo, lattice, origin);
+    steps.iter().scan(origin, |at, units| {
+        let frame = (sample_at(tempo, lattice, *at) - downbeat) / u128::from(FRAME);
+        *at += units;
+        Some(curve.get(usize::try_from(frame).map_or(last, |f| f.min(last))..).unwrap_or_default())
+    }).collect()
+}
+
+fn dynamics(levels: impl IntoIterator<Item = u8>) -> impl Iterator<Item = Option<String>> {
+    levels.into_iter().scan(None, |said, level| Some((said.replace(level) != Some(level)).then(|| format!("v{level}"))))
 }
 
 // ※ steps live on the finest multiple of the grid at or under 255; mixed-denominator steps could get slow tempos nearer c255 if a song ever needs it
@@ -646,6 +679,82 @@ mod tests {
         assert_eq!(loudest(0), 8192);
         assert!(loudest(60) < loudest(0) && loudest(60) > 0);
         assert_eq!(loudest(119), 0);
+    }
+
+    fn engraved(text: &str) -> String { let s = song(text); transcribe(&s, &s.patterns[0]).unwrap_or_else(|e| panic!("{e}")) }
+
+    fn levels(line: &str) -> Vec<u8> { line.split(' ').skip(3).filter_map(|w| w.strip_prefix('v')?.parse().ok()).collect() }
+
+    #[test]
+    fn a_fading_arp_steps_its_volume_down_with_no_envelope() {
+        let mml = engraved(&lone("pulse1", "A4 x4 arp 0,4,7 vol 12 fade"));
+        assert!(!mml.contains("@v"), "{mml}");
+        let line = mml.lines().next().unwrap();
+        assert_eq!(line.matches(" o").count(), 30);
+        assert!(line.ends_with(" v0 o5 e120 v10 r2 r4"), "the last step is silent and the lane volume comes back: {line}");
+        let levels = levels(line);
+        let (restore, ramp) = levels.split_last().unwrap();
+        assert_eq!((ramp.first(), ramp.last(), *restore), (Some(&12), Some(&0), 10));
+        let (_, said) = ramp.split_last().unwrap();
+        assert!(said.windows(2).all(|w| w[0] > w[1]), "descending, and a level held across steps is said once: {ramp:?}");
+        assert!(ramp.len() < 30, "{ramp:?}");
+    }
+
+    #[test]
+    fn a_fading_arp_reaches_silence_even_when_the_curve_never_would() {
+        let text = "song \"s\" tempo 120\npattern p bars 1 grid 160\nlane pulse1\n  1: C5 x3 arp 0,7 vol 15 fade\n";
+        assert!(engraved(text).starts_with("A t120 v0 @2 v15 o5 c160 v0 o5 g80 v10 "), "{}", engraved(text));
+        let samples = render(text).unwrap();
+        assert!(samples[..550].iter().any(|s| *s != 0));
+        assert!(samples[560..1650].iter().all(|s| *s == 0), "the second and last step should be silent");
+    }
+
+    #[test]
+    fn a_step_samples_the_frame_it_starts_in_not_the_next_one() {
+        let mml = engraved("song \"s\" tempo 150\npattern p bars 1 grid 16\nlane pulse1\n  1: C5 x4 arp 0,7 vol 15 fade\n");
+        let line = mml.lines().next().unwrap();
+        assert!(line.starts_with("A t150 v0 @2 v15 o5 c120 o5 g80 v14 o5 c120 "), "the second step starts 0.8 frames in, still frame 0: {line}");
+    }
+
+    #[test]
+    fn a_fading_slide_steps_through_its_walk_and_envelopes_its_hold() {
+        let mml = engraved(&lone("pulse1", "C5 x4 from A4 vol 12 fade"));
+        let tail = fall(12, 30)[3..].iter().map(u8::to_string).collect::<Vec<_>>().join(", ");
+        assert_eq!(mml.lines().take(2).collect::<Vec<_>>(), [format!("@v0 = {{{tail}}}").as_str(), "A t120 v0 @2 v12 o4 a120 o4 a+120 v11 o4 b120 @v0 o5 c5&c40 v10 r2 r4"]);
+        assert_eq!(mml.matches("@v").count(), 2);
+        assert!(render(&lone("pulse1", "C5 x4 from A4 vol 12 fade")).is_ok());
+    }
+
+    #[test]
+    fn a_hold_that_starts_in_the_last_frame_gets_a_one_entry_tail() {
+        let deep = engraved(&lone("pulse1", "C7 x4 from G4 fade"));
+        assert_eq!(deep.lines().next(), Some("@v0 = {0}"));
+        assert!(render(&lone("pulse1", "C7 x4 from G4 fade")).is_ok());
+        let fast = "song \"s\" tempo 255\npattern p bars 1 grid 255\nlane pulse1\n  1: C5 x7 from B4 fade\n";
+        assert_eq!(engraved(fast).lines().next(), Some("@v0 = {10, 0}"));
+        assert!(render(fast).is_ok());
+    }
+
+    #[test]
+    fn slide_tails_share_the_fade_book_and_the_129th_is_named() {
+        let twins = engraved("song \"s\" tempo 120\npattern p bars 2 grid 16\nlane pulse1\n  1.1: C5 x4 from A4 fade\n  2.1: C5 x4 from A4 fade\n");
+        assert_eq!(twins.lines().filter(|l| l.starts_with('@')).count(), 1, "{twins}");
+        assert_eq!(twins.lines().nth(1).unwrap().matches("@v0 ").count(), 2, "{twins}");
+        let crowd = |n: u32| song(&format!("song \"s\" tempo 120\npattern p bars {n} grid 16\nlane pulse1\n{}", (1..=n).map(|b| format!("  {b}.1: C7 x16 from {} vol {} fade\n", named(u8::try_from(95 - (b - 1) % 60).unwrap()), 15 - (b - 1) / 60)).collect::<String>()));
+        let fits = crowd(128);
+        assert_eq!(transcribe(&fits, &fits.patterns[0]).unwrap().lines().filter(|l| l.starts_with("@v")).count(), 128);
+        let over = crowd(129);
+        let refused = transcribe(&over, &over.patterns[0]).unwrap_err();
+        assert_eq!(refused, RenderError::Ornament { lane: "pulse1".into(), at: Position { bar: 129, slot: 1 }, flaw: Flaw::Crowded("fade"), played: None });
+    }
+
+    #[test]
+    fn a_fading_arp_hands_the_lane_back_on_the_next_note() {
+        let mml = engraved("song \"s\" tempo 120\npattern p bars 1 grid 16\nlane pulse1 vol 6\n  1: A4 x4 arp 0,4,7 vol 12 fade duty 75\n  5: A4 x4\n");
+        let line = mml.lines().next().unwrap();
+        assert!(line.starts_with("A t120 v0 @2 @3 v12 o4 a120 "), "{line}");
+        assert!(line.ends_with(" v0 o5 e120 @2 v6 o4 a4 r2"), "{line}");
+        assert_eq!(line.matches(" o").count(), 31);
     }
 
     #[test]

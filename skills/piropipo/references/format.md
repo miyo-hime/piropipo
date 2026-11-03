@@ -143,8 +143,10 @@ lane pulse1 duty 25 vol 9
 the rules between them:
 
 - one pitch effect per note: `vib`, `arp`, or `from`. two is an error naming both.
-- `vol` and `duty` stack with anything. `fade` stacks with `vib` but not with `arp` or
-  `from` (their steps would restart the fade every time).
+- `vol`, `duty`, and `fade` stack with anything. on an `arp` or `from`, each step holds
+  one volume along the fall, so the fade's granularity is the step's (about 60 a second, coarser on a
+  slow slide's walk). a fading arp's final step is silent, the way a plain fade's final
+  frame is.
 - effects on a rest are an error. a rest has nothing to bend, shake, or fade.
 - the noise lane refuses `vib`, `arp`, and `from` (its pitch is a timer setting), and
   the triangle refuses `vol` and `fade`.

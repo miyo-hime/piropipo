@@ -453,6 +453,17 @@ mod tests {
     }
 
     #[test]
+    fn a_fading_arp_is_measured_like_any_arp_and_leaves_the_next_note_alone() {
+        let pair = |first: &str| take(&format!("song \"s\" tempo 120\npattern p bars 1 grid 16\nlane pulse1 vol 6\n  1: A4 x4 arp 0,4,7{first}\n  5: A4 x4\n")).unwrap();
+        let (faded, plain) = (pair(" vol 12 fade duty 75"), pair(""));
+        assert_eq!(faded.stats.lanes[0].flourishes, [Flourish::Arpeggio { at: pos(1, 1), steps: 30, rate: 60.0 }]);
+        assert_eq!(faded.stats.lanes[0].notes.iter().map(|r| (r.at, r.end)).collect::<Vec<_>>(), [(pos(1, 1), pos(1, 4)), (pos(1, 5), pos(1, 8))]);
+        assert_eq!((faded.stats.seconds, faded.samples.len()), (plain.stats.seconds, plain.samples.len()));
+        assert_eq!(faded.samples[22_050..], plain.samples[22_050..], "the next note plays at the lane's own duty and volume");
+        assert!(faded.warnings.is_empty(), "{:?}", faded.warnings);
+    }
+
+    #[test]
     fn a_transposed_play_that_swings_off_the_chip_is_refused_at_the_note() {
         let off = refusal("song \"s\" tempo 120\npattern p bars 1 grid 4\nlane pulse1\n  1: G#7 x4 vib 90ct 6hz\nplay\n  p\n  p +2\n");
         assert_eq!((off.code, off.lane.as_deref(), off.at, off.line), ("vibrato-out-of-range", Some("pulse1"), Some(pos(1, 1)), Some(4)));

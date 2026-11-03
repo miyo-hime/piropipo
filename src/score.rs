@@ -127,7 +127,6 @@ pub enum Fault {
     BadDuty(String),
     BadVolume(String),
     SecondBend { first: &'static str, second: &'static str },
-    FadeOverSteps(&'static str),
     RestEffect(&'static str),
     BarZero,
     SlotZero,
@@ -179,7 +178,6 @@ impl Fault {
             Fault::BadDuty(_) => "bad-duty",
             Fault::BadVolume(_) => "bad-volume",
             Fault::SecondBend { .. } => "two-pitch-effects",
-            Fault::FadeOverSteps(_) => "fade-over-steps",
             Fault::RestEffect(_) => "effect-on-rest",
             Fault::BarZero => "bar-zero",
             Fault::SlotZero => "slot-zero",
@@ -240,7 +238,6 @@ impl fmt::Display for Fault {
             Fault::BadDuty(word) => write!(f, "{}", Breach::Duty(word.clone())),
             Fault::BadVolume(word) => write!(f, "`vol {word}` isn't a volume the chip has; pick a whole number from 0 to 15"),
             Fault::SecondBend { first, second } => write!(f, "`{first}` and `{second}` both bend this note's pitch; a note takes one pitch effect at most"),
-            Fault::FadeOverSteps(word) => write!(f, "`fade` can't ride `{word}`: every step restarts the chip's volume envelope, so the fade would reset each time; fade a plain or `vib` note instead"),
             Fault::RestEffect(word) => write!(f, "`{word}` on a rest; a rest has nothing to bend, shake, or fade"),
             Fault::BarZero => write!(f, "there is no bar 0; bars count from 1"),
             Fault::SlotZero => write!(f, "there is no slot 0; slots count from 1"),
@@ -530,7 +527,6 @@ fn adorn<'w>(words: impl Iterator<Item = &'w str>, faults: &mut Vec<Fault>) -> (
         };
         if let Err(fault) = read { faults.push(fault); }
     }
-    if let Some(steps) = marks.iter().copied().find(|m| matches!(*m, "arp" | "from")).filter(|_| ornaments.fade) { faults.push(Fault::FadeOverSteps(steps)); }
     (ornaments, marks)
 }
 
@@ -886,9 +882,9 @@ mod tests {
     fn composition_laws_are_checked_at_the_line() {
         assert_eq!(refused("C4 x4 vib 20ct 6hz arp 0,4"), [Fault::SecondBend { first: "vib", second: "arp" }]);
         assert_eq!(refused("C4 x4 from A3 vib 20ct 6hz"), [Fault::SecondBend { first: "from", second: "vib" }]);
-        assert_eq!(refused("C4 x4 arp 0,4 fade"), [Fault::FadeOverSteps("arp")]);
-        assert_eq!(refused("C4 x4 fade from G3"), [Fault::FadeOverSteps("from")]);
-        assert!(Song::parse(&format!("{TWO_BARS}  1.1: C4 x4 fade vib 10ct 5hz duty 25 vol 9\n")).is_ok(), "fade rides a vibrato, and duty and vol ride anything");
+        assert_eq!(adorned("C4 x4 arp 0,4,7 fade"), Ornaments { bend: Some(Bend::Arpeggio(vec![0, 4, 7])), fade: true, ..Ornaments::default() });
+        assert_eq!(adorned("C4 x4 fade from G3"), Ornaments { bend: Some(Bend::Slide(55)), fade: true, ..Ornaments::default() });
+        assert!(Song::parse(&format!("{TWO_BARS}  1.1: C4 x4 fade vib 10ct 5hz duty 25 vol 9\n")).is_ok(), "fade rides any pitch effect, and duty and vol ride anything");
         assert_eq!(Fault::SecondBend { first: "vib", second: "arp" }.to_string(), "`vib` and `arp` both bend this note's pitch; a note takes one pitch effect at most");
     }
 
