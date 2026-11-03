@@ -118,8 +118,8 @@ impl Part {
         let reach = |landed: i16| (i16::from(self.low)..=i16::from(self.high)).contains(&landed);
         match bend {
             Some(Bend::Vibrato(vib)) => self.shakes(pitch, vib.cents),
-            Some(Bend::Arpeggio(offsets)) => match offsets.iter().find(|o| !reach(i16::from(pitch) + **o)) {
-                Some(&offset) => Err(Flaw::Reach { offset: Some(offset), pitch, landed: i16::from(pitch) + offset, playable: self.playable }),
+            Some(Bend::Arpeggio(offsets)) => match offsets.iter().find(|o| !reach(i16::from(pitch).saturating_add(**o))) {
+                Some(&offset) => Err(Flaw::Reach { offset: Some(offset), pitch, landed: i16::from(pitch).saturating_add(offset), playable: self.playable }),
                 None => Ok(()),
             },
             Some(Bend::Slide(from)) if !reach(i16::from(*from)) => Err(Flaw::Reach { offset: None, pitch, landed: i16::from(*from), playable: self.playable }),
@@ -344,6 +344,12 @@ mod tests {
         assert_eq!(Breach::Loudness("16".into()).to_string(), "vol `16` isn't a volume the chip has; pick a whole number from 0 to 15");
         assert_eq!(setup("noise", &[("duty", "50")]).unwrap_err().to_string(), "doesn't take `duty`; it takes `vol`");
         assert_eq!(setup("pulse1", &[("volume", "5")]).unwrap_err().to_string(), "doesn't take `volume`; it takes `duty` and `vol`");
+    }
+
+    #[test]
+    fn an_arp_offset_past_the_integers_is_refused_not_overflowed() {
+        let charges = audit("song \"s\" tempo 120 profile nes\npattern p bars 1 grid 16\nlane pulse1\n  1: C4 x16 arp 0,32767\n");
+        assert!(charges.iter().any(|b| b.to_string().starts_with("the arp's +32767 lands on")), "{charges:?}");
     }
 
     #[test]
