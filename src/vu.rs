@@ -123,7 +123,7 @@ fn turnout(song: &Song, pattern: &Pattern) -> Turnout {
 
 fn edge(span: &Range<usize>, bars: u32, bar: u32) -> usize { span.start + usize::try_from(span.len() as u64 * u64::from(bar) / u64::from(bars.max(1))).unwrap_or(span.len()) }
 
-fn seconds(sample: usize) -> f64 { round(sample as f64 / f64::from(SAMPLE_RATE), 3) }
+fn seconds(sample: usize) -> f64 { round(sample as f64 / f64::from(SAMPLE_RATE), 6) }
 
 fn rms_dbfs(samples: &[i16]) -> Option<f64> {
     let energy: u64 = samples.iter().map(|s| u64::from(s.unsigned_abs()).pow(2)).sum();
@@ -243,7 +243,7 @@ mod tests {
         let sections = json["sections"].as_array().unwrap();
         let spans: Vec<Range<usize>> = sections.iter().map(|s| s["start_sample"].as_u64().unwrap() as usize..s["end_sample"].as_u64().unwrap() as usize).collect();
         assert_eq!(spans, heard.plays, "a section is exactly the stretch of wav its play rendered");
-        assert_eq!((spans[1].start, sections[1]["start_seconds"].clone(), sections[0]["end_seconds"].clone()), (79_579, json!(1.805), json!(1.805)), "four beats at 133 is 79578.9 samples, which the millisecond field can only round");
+        assert_eq!((spans[1].start, sections[1]["start_seconds"].clone(), sections[0]["end_seconds"].clone()), (79_579, json!(1.804512), json!(1.804512)), "four beats at 133 is 79578.9 samples, which the seconds field can only round");
         assert_eq!(sections.iter().map(|s| (s["grid"].clone(), s["line"].clone())).collect::<Vec<_>>(), [(json!(16), json!(2)), (json!(14), json!(7)), (json!(16), json!(2))]);
         assert_eq!(sections[0]["lanes"], json!([{ "lane": "pulse1", "line": 3 }, { "lane": "noise", "line": 5 }]));
         assert_eq!(sections[1]["lanes"], json!([{ "lane": "noise", "line": 8 }, { "lane": "pulse1", "line": 10 }]), "each pattern block has its own lane headers, in written order");
