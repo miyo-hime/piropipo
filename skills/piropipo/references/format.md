@@ -217,9 +217,12 @@ beyond the lint, check measures the render - these are the ears:
 - **stats**: the headline (duration, peak dbfs, saturated samples), whole-song rms, and
   `sections` - one entry per play in song order, with the pattern name, which play of it
   (`play` counts "the nth time this pattern plays", not the play-block line), its
-  transpose, its `beats`, its start in seconds, and per-bar rms/peak. `sounding_percent`
-  gives each lane's sounding share per pattern and over the whole song. `--summary` cuts
-  everything back to the headline plus warnings, in both json and `--human`.
+  transpose, its `beats` and `grid`, the source `line` of its pattern header, its start
+  and end in seconds and in exact wav samples, its `lanes` (each lane header's name and
+  source line, in written order), and per-bar rms/peak. `sounding_percent` gives each
+  lane's sounding share per pattern and over the whole song. `--summary` cuts everything
+  back to the headline plus warnings, in both json and `--human`, so the sections table
+  goes with it.
 - **the harmony advisory**: sustained harsh intervals (minor 2nd, major 7th, tritone at
   any octave spread) held 3/4 of a beat or longer between pitched lanes, each with its
   span, lane pair, interval, and a strong-beat tag (beats 1 and 3 in common time; only
@@ -229,13 +232,22 @@ beyond the lint, check measures the render - these are the ears:
   deliberate clash is music, and this section cannot fail a check.
 - **`--events`**: every note as it plays, in song order with transposes applied - pitch
   as heard (the noise lane reports its bare letter), `bar.slot` span, start and end in
-  seconds AND in exact wav samples, volume, source line, and the note's effects with
-  their achieved values. json only; pairs with `--summary` for a lean payload. built for
-  anything that draws or analyzes a piece without re-parsing the score.
+  seconds AND in exact wav samples, volume and duty as the note plays them (the lane's
+  setting unless the note overrides it; duty is null off the pulses), source line, and
+  the note's effects with their achieved values. written rests (`- xN`) come in a
+  separate `rests` list on the same clock and in the same order, each with its span,
+  times, samples, and source line, so silence that was written can be drawn as such and
+  anything that only wants sounding notes reads `events` and never sees one. json only
+  (`--human` just counts them). pairs with `--summary` for a lean payload, but the lean
+  payload carries no `sections`: run without `--summary` when you need section
+  boundaries or lane header lines. built for visualizers and anything else that draws or
+  analyzes a piece without re-parsing the score.
 
 "end" always means **the last slot the note rings in**, inclusive. a note at `1.9` with
 `x16` rings through `2.8`, and the next note may start at `2.9`. a perfect seam is
-end + 1 = next start, never end = next start.
+end + 1 = next start, never end = next start. samples count the other way: an
+`end_sample` is the first sample *after* the note or section, so at a seam it equals the
+next one's `start_sample`, and the sections tile the wav without a gap.
 
 notes within a lane may be written in any order (the checker sorts; position is truth,
 line order is convenience), and pattern names are unique per file.

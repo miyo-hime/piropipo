@@ -145,7 +145,7 @@ pub fn answer(verb: &str, human: bool, detail: Detail, played: Result<(Option<Pa
             let stats = if detail == Detail::Headline { take.stats.headline() } else { take.stats.json() };
             let mut envelope = json!({ "ok": true, "verb": verb, "output": output.as_ref().map(|p| p.display().to_string()), "stats": stats, "warnings": take.warnings.iter().map(Remark::json).collect::<Vec<_>>() });
             if detail == Detail::Everything { envelope["harmony"] = harmony::json(&take.rubs); }
-            if let Some(strikes) = &take.strikes { envelope["events"] = events::json(strikes); }
+            if let Some(strikes) = &take.strikes { envelope["events"] = events::json(strikes); envelope["rests"] = events::rests(strikes); }
             envelope["errors"] = json!([]);
             let mut told = tell(output.as_deref(), &take.stats, detail, &take.warnings);
             if detail == Detail::Everything { told = format!("{told}\n{}", harmony::tell(&take.rubs)); }

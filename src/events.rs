@@ -6,32 +6,38 @@ use serde_json::{Value, json};
 use std::ops::Range;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Strike { pub pattern: String, pub play: usize, pub lane: String, pub voice: Voice, pub pitch: u8, pub at: Position, pub end: Position, pub samples: Range<u64>, pub volume: u8, pub line: usize, pub ornaments: Ornaments, pub pace: Option<(u64, f64)> }
+pub struct Strike { pub pattern: String, pub play: usize, pub lane: String, pub voice: Voice, pub pitch: Option<u8>, pub at: Position, pub end: Position, pub samples: Range<u64>, pub volume: u8, pub duty: Option<u8>, pub line: usize, pub ornaments: Ornaments, pub pace: Option<(u64, f64)> }
 
 impl Strike {
-    fn json(&self) -> Value {
+    fn json(&self, pitch: u8) -> Value {
         let noise = self.voice == Voice::Noise;
         // the noise hears only the letter: its octave never reaches the chip
-        let pitch = if noise { named(self.pitch).trim_end_matches(|c: char| c.is_ascii_digit() || c == '-').to_owned() } else { named(self.pitch) };
+        let heard = if noise { named(pitch).trim_end_matches(|c: char| c.is_ascii_digit() || c == '-').to_owned() } else { named(pitch) };
         json!({
-            "pattern": self.pattern, "play": self.play, "lane": self.lane, "pitch": pitch, "midi": (!noise).then_some(self.pitch), "at": self.at.to_string(), "end": self.end.to_string(),
+            "pattern": self.pattern, "play": self.play, "lane": self.lane, "pitch": heard, "midi": (!noise).then_some(pitch), "at": self.at.to_string(), "end": self.end.to_string(),
             "start_seconds": seconds(self.samples.start), "end_seconds": seconds(self.samples.end), "start_sample": self.samples.start, "end_sample": self.samples.end,
-            "volume": self.volume, "line": self.line, "effects": self.effects(),
+            "volume": self.volume, "duty": self.duty.and_then(width), "line": self.line, "effects": self.effects(pitch),
         })
     }
 
-    fn effects(&self) -> Value {
+    fn hush(&self) -> Value {
+        json!({
+            "pattern": self.pattern, "play": self.play, "lane": self.lane, "at": self.at.to_string(), "end": self.end.to_string(),
+            "start_seconds": seconds(self.samples.start), "end_seconds": seconds(self.samples.end), "start_sample": self.samples.start, "end_sample": self.samples.end, "line": self.line,
+        })
+    }
+
+    fn effects(&self, pitch: u8) -> Value {
         let Ornaments { bend, duty, vol, fade } = &self.ornaments;
         let (steps, rate) = (self.pace.map(|(steps, _)| steps), self.pace.map(|(_, rate)| round(rate, 2)));
         let bend = bend.as_ref().map(|b| (b.word(), match b {
             Bend::Vibrato(vib) => {
-                let (up, down) = profile::swing(self.pitch, profile::ticks(self.pitch, vib.cents));
+                let (up, down) = profile::swing(pitch, profile::ticks(pitch, vib.cents));
                 json!({ "rate_hz": round(vib.hertz(), 3), "delay_ms": round(vib.delay_ms(), 1), "up_cents": round(up, 2), "down_cents": round(down, 2) })
             }
             Bend::Arpeggio(offsets) => json!({ "offsets": offsets, "steps": steps, "steps_per_second": rate }),
             Bend::Slide(from) => json!({ "pitch": named(*from), "midi": from, "steps_per_second": rate }),
         }));
-        let width = |register: u8| DUTIES.get(usize::from(register)).and_then(|names| names.first()).and_then(|name| name.parse::<f64>().ok());
         let marks = [bend, duty.map(|d| ("duty", json!(width(d)))), vol.map(|v| ("vol", json!(v))), fade.then(|| ("fade", json!(true)))];
         Value::Object(marks.into_iter().flatten().map(|(word, said)| (word.to_owned(), said)).collect())
     }
@@ -49,12 +55,12 @@ pub fn strikes(take: &Take) -> Vec<Strike> {
         let mut batch: Vec<(usize, Strike)> = Vec::new();
         for lane in &moved.lanes {
             let Some((seat, part)) = card.parts.iter().enumerate().find(|(_, p)| p.name == lane.name) else { continue };
-            let Ok(Setup { volume: home, .. }) = part.setup(&lane.params) else { continue };
+            let Ok(Setup { volume: home, duty: cast }) = part.setup(&lane.params) else { continue };
             for note in &lane.notes {
-                let Some(pitch) = note.pitch else { continue };
                 let from = note.at.tick(moved.grid);
                 let pace = matches!(note.ornaments.bend, Some(Bend::Arpeggio(_) | Bend::Slide(_))).then(|| render::arp_rate(song.tempo, &moved, note.len)).flatten();
-                let struck = Strike { pattern: moved.name.clone(), play, lane: lane.name.clone(), voice: part.voice, pitch, at: note.at, end: note.rings_through(moved.grid), samples: sample(from)..sample(from + u64::from(note.len)), volume: note.ornaments.vol.unwrap_or(home), line: note.line, ornaments: note.ornaments.clone(), pace };
+                let duty = note.pitch.and(note.ornaments.duty.or(cast));
+                let struck = Strike { pattern: moved.name.clone(), play, lane: lane.name.clone(), voice: part.voice, pitch: note.pitch, at: note.at, end: note.rings_through(moved.grid), samples: sample(from)..sample(from + u64::from(note.len)), volume: note.ornaments.vol.unwrap_or(home), duty, line: note.line, ornaments: note.ornaments.clone(), pace };
                 batch.push((seat, struck));
             }
         }
@@ -64,12 +70,17 @@ pub fn strikes(take: &Take) -> Vec<Strike> {
     heard
 }
 
-pub fn json(strikes: &[Strike]) -> Value { strikes.iter().map(Strike::json).collect() }
+pub fn json(strikes: &[Strike]) -> Value { strikes.iter().filter_map(|s| Some(s.json(s.pitch?))).collect() }
+
+pub fn rests(strikes: &[Strike]) -> Value { strikes.iter().filter(|s| s.pitch.is_none()).map(Strike::hush).collect() }
 
 pub fn tell(strikes: &[Strike]) -> String {
-    let count = match strikes.len() { 0 => "no notes struck".to_owned(), 1 => "1 note struck".to_owned(), n => format!("{n} notes struck") };
-    format!("events: {count}; the list prints in the json only, so drop --human to read it")
+    let rests = strikes.iter().filter(|s| s.pitch.is_none()).count();
+    let tally = |n: usize, one: &str, many: &str| match n { 0 => format!("no {many}"), 1 => format!("1 {one}"), n => format!("{n} {many}") };
+    format!("events: {}, {}; the lists print in the json only, so drop --human to read them", tally(strikes.len() - rests, "note struck", "notes struck"), tally(rests, "rest written", "rests written"))
 }
+
+fn width(register: u8) -> Option<f64> { DUTIES.get(usize::from(register)).and_then(|names| names.first()).and_then(|name| name.parse().ok()) }
 
 fn seconds(sample: u64) -> f64 { round(sample as f64 / f64::from(SAMPLE_RATE), 6) }
 
@@ -134,9 +145,45 @@ mod tests {
     }
 
     #[test]
-    fn rests_are_not_events_and_a_play_lists_by_time_then_by_lane() {
+    fn rests_list_apart_from_the_notes_and_a_play_lists_by_time_then_by_lane() {
         let (_, strikes) = struck("song \"s\" tempo 120\npattern p bars 1 grid 8\nlane noise\n  1: C4 x1\nlane pulse2\n  1: - x2\n  3: E4 x2 vol 0\nlane pulse1 vol 6\n  1: C4 x2\n  3: - x2\n");
-        assert_eq!(strikes.iter().map(|s| (s.at, s.lane.as_str(), s.volume)).collect::<Vec<_>>(), [(pos(1, 1), "pulse1", 6), (pos(1, 1), "noise", 10), (pos(1, 3), "pulse2", 0)], "a muted note is still written, so it's listed at volume 0");
+        let told = json(&strikes);
+        assert_eq!(told.as_array().unwrap().iter().map(|e| (e["at"].clone(), e["lane"].clone(), e["volume"].clone())).collect::<Vec<_>>(), [(json!("1.1"), json!("pulse1"), json!(6)), (json!("1.1"), json!("noise"), json!(10)), (json!("1.3"), json!("pulse2"), json!(0))], "a muted note is still written, so it's listed at volume 0");
+        assert_eq!(rests(&strikes), json!([
+            { "pattern": "p", "play": 1, "lane": "pulse2", "at": "1.1", "end": "1.2", "start_seconds": 0.0, "end_seconds": 0.5, "start_sample": 0, "end_sample": 22_050, "line": 6 },
+            { "pattern": "p", "play": 1, "lane": "pulse1", "at": "1.3", "end": "1.4", "start_seconds": 0.5, "end_seconds": 1.0, "start_sample": 22_050, "end_sample": 44_100, "line": 10 },
+        ]), "rests run on the same clock and order as the notes, and carry only what silence has");
+    }
+
+    #[test]
+    fn every_play_writes_its_rests_again() {
+        let (_, strikes) = struck("song \"s\" tempo 120\npattern p bars 1 grid 4\nlane triangle\n  1: C3 x2\n  3: - x2\nplay\n  p\n  p +5\n");
+        let told = rests(&strikes);
+        assert_eq!(told.as_array().unwrap().iter().map(|r| (r["play"].clone(), r["start_sample"].clone(), r["line"].clone())).collect::<Vec<_>>(), [(json!(1), json!(44_100), json!(5)), (json!(2), json!(132_300), json!(5))]);
+        assert_eq!(json(&strikes).as_array().unwrap().len(), 2, "the notes list never sees a rest");
+    }
+
+    #[test]
+    fn duty_is_what_the_note_plays_whether_the_lane_or_the_note_set_it() {
+        let (_, strikes) = struck("song \"s\" tempo 120\npattern a bars 1 grid 4\nlane pulse1 duty 12.5\n  1: C4 x1\n  2: D4 x1 duty 75\n  3: E4 x1\n  4: - x1\nlane pulse2\n  1: G4 x4\nlane triangle\n  1: C3 x4\nlane noise\n  1: C4 x4\npattern b bars 1 grid 4\nlane pulse1 duty 25\n  1: C4 x4\nplay\n  a\n  b\n");
+        let told = json(&strikes);
+        let duties: Vec<(Value, Value, Value, Value)> = told.as_array().unwrap().iter().map(|e| (e["pattern"].clone(), e["lane"].clone(), e["duty"].clone(), e["effects"].get("duty").cloned().unwrap_or(Value::Null))).collect();
+        assert_eq!(duties, [
+            (json!("a"), json!("pulse1"), json!(12.5), Value::Null), (json!("a"), json!("pulse2"), json!(50.0), Value::Null), (json!("a"), json!("triangle"), Value::Null, Value::Null), (json!("a"), json!("noise"), Value::Null, Value::Null),
+            (json!("a"), json!("pulse1"), json!(75.0), json!(75.0)), (json!("a"), json!("pulse1"), json!(12.5), Value::Null), (json!("b"), json!("pulse1"), json!(25.0), Value::Null),
+        ], "the lane header casts the duty, a note's own duty lasts that note only, a bare pulse lane plays 50, and each pattern block casts afresh");
+    }
+
+    #[test]
+    fn a_section_starts_on_the_very_sample_its_first_note_does() {
+        let (heard, strikes) = struck("song \"s\" tempo 133\npattern a bars 1 grid 16\nlane pulse1\n  1: C4 x16\npattern b bars 1 beats 7 grid 14\nlane pulse1\n  1: - x2\n  3: E4 x12\nplay\n  a\n  b\n  a\n");
+        let sections = crate::vu::read(&heard.song, &heard.samples, &heard.plays).json();
+        let edges: Vec<(Value, Value)> = sections["sections"].as_array().unwrap().iter().map(|s| (s["start_sample"].clone(), s["end_sample"].clone())).collect();
+        let notes = json(&strikes);
+        let quiet = rests(&strikes);
+        assert_eq!([notes[0]["start_sample"].clone(), quiet[0]["start_sample"].clone(), notes[2]["start_sample"].clone()], [edges[0].0.clone(), edges[1].0.clone(), edges[2].0.clone()]);
+        assert_eq!(notes[2]["end_sample"], edges[2].1, "the last note rings out on the section's last sample");
+        assert_eq!(edges[0].1, edges[1].0, "sections tile the render");
     }
 
     #[test]
@@ -146,11 +193,11 @@ mod tests {
         let told = json(&strikes);
         assert_eq!(told[0], json!({
             "pattern": "p", "play": 1, "lane": "pulse1", "pitch": "A4", "midi": 69, "at": "1.1", "end": "1.8",
-            "start_seconds": 0.0, "end_seconds": 1.0, "start_sample": 0, "end_sample": 44_100, "volume": 12, "line": 4,
+            "start_seconds": 0.0, "end_seconds": 1.0, "start_sample": 0, "end_sample": 44_100, "volume": 12, "duty": 25.0, "line": 4,
             "effects": { "vib": { "rate_hz": 6.667, "delay_ms": 133.3, "up_cents": round(up, 2), "down_cents": round(down, 2) }, "duty": 25.0, "vol": 12, "fade": true },
         }));
-        assert_eq!((told[1]["lane"].clone(), told[1]["volume"].clone(), told[1]["effects"].clone()), (json!("triangle"), json!(15), json!({})), "the triangle has no knob, so it plays at the renderer's full 15");
-        assert_eq!((told[2]["at"].clone(), told[2]["volume"].clone(), told[2]["effects"].clone()), (json!("1.9"), json!(10), json!({})));
+        assert_eq!((told[1]["lane"].clone(), told[1]["volume"].clone(), told[1]["duty"].clone(), told[1]["effects"].clone()), (json!("triangle"), json!(15), Value::Null, json!({})), "the triangle has no knob, so it plays at the renderer's full 15 and has no duty to speak of");
+        assert_eq!((told[2]["at"].clone(), told[2]["volume"].clone(), told[2]["duty"].clone(), told[2]["effects"].clone()), (json!("1.9"), json!(10), json!(50.0), json!({})), "the lane's duty 50 comes back once the override's note is done");
     }
 
     #[test]
@@ -180,8 +227,8 @@ mod tests {
 
     #[test]
     fn the_human_line_counts_and_points_at_the_json() {
-        assert_eq!(tell(&[]), "events: no notes struck; the list prints in the json only, so drop --human to read it");
-        let (_, strikes) = struck("song \"s\" tempo 120\npattern p bars 1 grid 4\nlane pulse1\n  1: C4 x1\n  3: D4 x1\n");
-        assert_eq!(tell(&strikes), "events: 2 notes struck; the list prints in the json only, so drop --human to read it");
+        assert_eq!(tell(&[]), "events: no notes struck, no rests written; the lists print in the json only, so drop --human to read them");
+        let (_, strikes) = struck("song \"s\" tempo 120\npattern p bars 1 grid 4\nlane pulse1\n  1: C4 x1\n  2: - x1\n  3: D4 x1\n");
+        assert_eq!(tell(&strikes), "events: 2 notes struck, 1 rest written; the lists print in the json only, so drop --human to read them");
     }
 }

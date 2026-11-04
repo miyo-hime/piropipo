@@ -13,7 +13,7 @@ pub struct Args {
     pub strict: bool,
     #[arg(long, help = "only the headline (duration, peak, saturation) plus any warnings; skips the loudness curve, lane activity, and per-lane notes")]
     pub summary: bool,
-    #[arg(long, help = "also list every note as it plays, in song order with transposes applied: pitch, bar.slot, seconds and wav samples, volume, effects. json only (--human just counts them); pairs with --summary for a lean payload")]
+    #[arg(long, help = "also list every note as it plays, in song order with transposes applied: pitch, bar.slot, seconds and wav samples, volume and duty as heard, effects; written rests get a list of their own. json only (--human just counts them); pairs with --summary for a lean payload, which drops the sections table")]
     pub events: bool,
 }
 

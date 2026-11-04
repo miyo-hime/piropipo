@@ -24,7 +24,7 @@ piro sketch song.sketch  # notes in order in, positioned .piro out
 
 everything answers in json on stdout, because the main user is a program. `--human` gets you sentences instead.
 
-the deaf-composer problem is handled in layers: `check` lints positions and chip ranges before anything renders; the stats report duration, peak, a per-bar loudness curve, each lane's activity, and a harmony advisory for sustained clashes; `--events` hands every note with sample-exact times to anything you build on top; and `roll` draws the grid (`--patterns`/`--bars` crop one section) so eyes (yours, or a vision model's) can catch what numbers miss.
+the deaf-composer problem is handled in layers: `check` lints positions and chip ranges before anything renders; the stats report duration, peak, a per-bar loudness curve, each lane's activity, and a harmony advisory for sustained clashes; `--events` hands every note and written rest, sample-exact, to anything you build on top; and `roll` draws the grid (`--patterns`/`--bars` crop one section) so eyes (yours, or a vision model's) can catch what numbers miss.
 
 `piro sfx` deserves its own sentence: presets like `coin`, `jump` and `explosion` work with zero knobs, the dials are real units (Hz, ms, semitones) instead of sfxr's 0-to-1 mystery floats, and the same command gives you the same bytes every run. the flag table and preset-reshaping rules live in [sfx-mapping.md](skills/piropipo/references/sfx-mapping.md).
 

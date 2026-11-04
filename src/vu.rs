@@ -20,12 +20,17 @@ impl Level {
 pub struct Bar { pub bar: u32, pub at: f64, pub level: Level }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Section { pub pattern: String, pub play: usize, pub plays: usize, pub shift: i8, pub beats: u32, pub at: f64, pub level: Level, pub bars: Vec<Bar> }
+pub struct Section { pub pattern: String, pub play: usize, pub plays: usize, pub shift: i8, pub beats: u32, pub grid: u32, pub line: usize, pub samples: Range<usize>, pub level: Level, pub lanes: Vec<(String, usize)>, pub bars: Vec<Bar> }
 
 impl Section {
     fn json(&self) -> Value {
+        let lanes: Vec<Value> = self.lanes.iter().map(|(lane, line)| json!({ "lane": lane, "line": line })).collect();
         let bars: Vec<Value> = self.bars.iter().map(|b| json!({ "bar": b.bar, "start_seconds": b.at, "rms_dbfs": b.level.rms, "peak_dbfs": b.level.peak })).collect();
-        json!({ "pattern": self.pattern, "play": self.play, "transpose": self.shift, "beats": self.beats, "start_seconds": self.at, "rms_dbfs": self.level.rms, "peak_dbfs": self.level.peak, "bars": bars })
+        json!({
+            "pattern": self.pattern, "play": self.play, "transpose": self.shift, "beats": self.beats, "grid": self.grid, "line": self.line,
+            "start_seconds": seconds(self.samples.start), "end_seconds": seconds(self.samples.end), "start_sample": self.samples.start, "end_sample": self.samples.end,
+            "rms_dbfs": self.level.rms, "peak_dbfs": self.level.peak, "lanes": lanes, "bars": bars,
+        })
     }
 
     fn label(&self) -> String {
@@ -36,7 +41,7 @@ impl Section {
     }
 
     fn tell(&self, loudest: f64) -> Vec<String> {
-        let head = format!("{} at {:.2}s: rms {}, peak {}", self.label(), self.at, db(self.level.rms), db(self.level.peak));
+        let head = format!("{} at {:.2}s: rms {}, peak {}", self.label(), seconds(self.samples.start), db(self.level.rms), db(self.level.peak));
         std::iter::once(head).chain(self.bars.iter().map(|b| format!("  bar {:<3} {:>6} rms {:>6} peak  {}", b.bar, db(b.level.rms), db(b.level.peak), needle(b.level.rms, loudest)))).collect()
     }
 }
@@ -86,7 +91,8 @@ pub fn read(song: &Song, samples: &[i16], plays: &[Range<usize>]) -> Reading {
         let play = cues.iter().take(i + 1).filter(|c| c.0.name == pattern.name).count();
         let plays = cues.iter().filter(|c| c.0.name == pattern.name).count();
         let bars = (0..pattern.bars).map(|b| { let (from, to) = (edge(span, pattern.bars, b), edge(span, pattern.bars, b + 1)); Bar { bar: b + 1, at: seconds(from), level: Level::of(samples.get(from..to).unwrap_or_default()) } }).collect();
-        Section { pattern: pattern.name.clone(), play, plays, shift, beats: pattern.beats, at: seconds(span.start), level: Level::of(samples.get(span.clone()).unwrap_or_default()), bars }
+        let lanes = pattern.lanes.iter().map(|l| (l.name.clone(), l.line)).collect();
+        Section { pattern: pattern.name.clone(), play, plays, shift, beats: pattern.beats, grid: pattern.grid, line: pattern.line, samples: span.clone(), level: Level::of(samples.get(span.clone()).unwrap_or_default()), lanes, bars }
     }).collect();
     let mut turnouts: Vec<Turnout> = Vec::new();
     for &(pattern, _, _) in &cues { if !turnouts.iter().any(|t| t.pattern == pattern.name) { turnouts.push(turnout(song, pattern)); } }
@@ -167,7 +173,7 @@ mod tests {
     fn sections_follow_the_play_block_and_count_repeats() {
         let reading = rounds();
         assert_eq!(reading.sections.iter().map(Section::label).collect::<Vec<_>>(), ["a (play 1 of 2)", "b", "a (play 2 of 2, +2)"]);
-        assert_eq!(reading.sections.iter().map(|s| (s.play, s.shift, s.at)).collect::<Vec<_>>(), [(1, 0, 0.0), (1, 0, 2.0), (2, 2, 3.0)]);
+        assert_eq!(reading.sections.iter().map(|s| (s.play, s.shift, s.samples.clone())).collect::<Vec<_>>(), [(1, 0, 0..88_200), (1, 0, 88_200..132_300), (2, 2, 132_300..220_500)]);
         let first = &reading.sections[0];
         assert_eq!(first.bars.iter().map(|b| (b.bar, b.at, b.level)).collect::<Vec<_>>(), [(1, 0.0, Level { rms: Some(-6.02), peak: Some(-6.02) }), (2, 1.0, Level { rms: None, peak: None })]);
         assert_eq!(first.level, Level { rms: Some(-9.03), peak: Some(-6.02) }, "a section's rms is over its samples, not an average of its bars' decibels");
@@ -196,7 +202,7 @@ mod tests {
         let reading = read(&heard.song, &heard.samples, &heard.plays);
         let (b, a) = (&reading.sections[0], &reading.sections[1]);
         assert_eq!((b.level, b.bars.len()), (Level { rms: None, peak: None }, 2));
-        assert_eq!((a.at, a.level.peak), (4.0, heard.stats.peak_dbfs));
+        assert_eq!((a.samples.clone(), a.level.peak), (176_400..264_600, heard.stats.peak_dbfs));
         assert!(a.level.rms.is_some_and(|rms| rms < -3.0), "{a:?}");
         assert_eq!(reading.rms, rms_dbfs(&heard.samples));
     }
@@ -212,7 +218,7 @@ mod tests {
     #[test]
     fn the_reading_speaks_json_by_section_and_by_lane() {
         let json = rounds().json();
-        assert_eq!(json["sections"][2], json!({ "pattern": "a", "play": 2, "transpose": 2, "beats": 4, "start_seconds": 3.0, "rms_dbfs": 0.0, "peak_dbfs": 0.0, "bars": [
+        assert_eq!(json["sections"][2], json!({ "pattern": "a", "play": 2, "transpose": 2, "beats": 4, "grid": 4, "line": 2, "start_seconds": 3.0, "end_seconds": 5.0, "start_sample": 132_300, "end_sample": 220_500, "rms_dbfs": 0.0, "peak_dbfs": 0.0, "lanes": [{ "lane": "pulse1", "line": 3 }], "bars": [
             { "bar": 1, "start_seconds": 3.0, "rms_dbfs": 0.0, "peak_dbfs": 0.0 },
             { "bar": 2, "start_seconds": 4.0, "rms_dbfs": 0.0, "peak_dbfs": 0.0 },
         ] }));
@@ -227,7 +233,21 @@ mod tests {
         let json = read(&heard.song, &heard.samples, &heard.plays).json();
         assert_eq!(json["sections"].as_array().unwrap().iter().map(|s| s["beats"].clone()).collect::<Vec<_>>(), [json!(4), json!(7)]);
         assert_eq!(json["sections"][1]["bars"].as_array().unwrap().iter().map(|b| b["start_seconds"].clone()).collect::<Vec<_>>(), [json!(2.0), json!(5.5)], "a seven-beat bar at 120 lasts 3.5 s");
-        assert_eq!(json["sections"][0].as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(), ["pattern", "play", "transpose", "beats", "start_seconds", "rms_dbfs", "peak_dbfs", "bars"]);
+        assert_eq!(json["sections"][0].as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(), ["pattern", "play", "transpose", "beats", "grid", "line", "start_seconds", "end_seconds", "start_sample", "end_sample", "rms_dbfs", "peak_dbfs", "lanes", "bars"]);
+    }
+
+    #[test]
+    fn each_section_names_its_source_lines_and_its_exact_samples() {
+        let heard = take("song \"s\" tempo 133\npattern a bars 1 grid 16\nlane pulse1 duty 25\n  1: C4 x16\nlane noise\n  1: C4 x16\npattern b bars 2 beats 7 grid 14\nlane noise\n  1.1: C4 x28\nlane pulse1\n  1.1: - x28\nplay\n  a\n  b\n  a +2\n").unwrap();
+        let json = read(&heard.song, &heard.samples, &heard.plays).json();
+        let sections = json["sections"].as_array().unwrap();
+        let spans: Vec<Range<usize>> = sections.iter().map(|s| s["start_sample"].as_u64().unwrap() as usize..s["end_sample"].as_u64().unwrap() as usize).collect();
+        assert_eq!(spans, heard.plays, "a section is exactly the stretch of wav its play rendered");
+        assert_eq!((spans[1].start, sections[1]["start_seconds"].clone(), sections[0]["end_seconds"].clone()), (79_579, json!(1.805), json!(1.805)), "four beats at 133 is 79578.9 samples, which the millisecond field can only round");
+        assert_eq!(sections.iter().map(|s| (s["grid"].clone(), s["line"].clone())).collect::<Vec<_>>(), [(json!(16), json!(2)), (json!(14), json!(7)), (json!(16), json!(2))]);
+        assert_eq!(sections[0]["lanes"], json!([{ "lane": "pulse1", "line": 3 }, { "lane": "noise", "line": 5 }]));
+        assert_eq!(sections[1]["lanes"], json!([{ "lane": "noise", "line": 8 }, { "lane": "pulse1", "line": 10 }]), "each pattern block has its own lane headers, in written order");
+        assert_eq!(sections[2]["lanes"], sections[0]["lanes"]);
     }
 
     #[test]
