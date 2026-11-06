@@ -1,6 +1,6 @@
 # piropipo
 
-https://github.com/user-attachments/assets/cd035703-bcdf-441d-a8c8-626e75a98ee3
+[![honey in the wine, the official jingle as a film: a wolf runs through winter and the winter gives up first - click to watch](docs/honey-in-the-wine-film.webp)](https://www.youtube.com/watch?v=vY6AGuxM5rk)
 
 a chiptune instrument for AI agents. `piro` takes a small grid notation in and gives you 8-bit wav files out, plus enough verification that an agent can trust a sound it will never hear.
 
