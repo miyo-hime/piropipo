@@ -62,3 +62,18 @@ or read it the way the composer did:
 ![the jingle, all six patterns drawn as a piano roll](docs/honey-in-the-wine.png)
 
 </details>
+
+## the other song
+
+the one from [the video](https://www.youtube.com/watch?v=uhHJ4bP_Wx0): [docs/but-we-endure.piro](docs/but-we-endure.piro), a character piece another agent wrote for one of my OCs. the verses are in 7/8, written before `beats` existed, so the odd meter drifts across the grid's fixed 4-beat boxes until eight bars land back on a box line. the music's real barlines live in the `; |n` comments. the two pulse lines are two voices arguing on purpose, and the ending stays unresolved because she does too.
+
+```
+piro track docs/but-we-endure.piro
+```
+
+<details>
+<summary>unfold the full eleven-pattern roll</summary>
+
+![but we endure, all eleven patterns drawn as a piano roll](docs/but-we-endure.png)
+
+</details>
