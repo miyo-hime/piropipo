@@ -1,0 +1,98 @@
+[
+ {
+  "section": "fragments",
+  "lanes": [
+   "pulse1"
+  ],
+  "filter": {
+   "cutoff": [
+    9000,
+    1500
+   ]
+  },
+  "crush": {
+   "bits": [
+    8,
+    4
+   ],
+   "hold": [
+    1,
+    10
+   ]
+  },
+  "gate": {
+   "rate": 12,
+   "depth": [
+    0.0,
+    0.45
+   ]
+  },
+  "why": "the fragmented mind: the melody stays whole while its sound darkens, grits and stutters"
+ },
+ {
+  "section": "fragments",
+  "lanes": [
+   "pulse2"
+  ],
+  "filter": {
+   "cutoff": [
+    7000,
+    1200
+   ]
+  },
+  "crush": {
+   "bits": [
+    8,
+    5
+   ],
+   "hold": [
+    1,
+    6
+   ]
+  },
+  "why": "the accompaniment frays behind it"
+ },
+ {
+  "section": "shatter",
+  "lanes": [
+   "pulse1",
+   "pulse2"
+  ],
+  "drive": [
+   1.5,
+   2.5
+  ],
+  "why": "the climax pushed into the red"
+ },
+ {
+  "section": "shatter",
+  "bars": [
+   7,
+   8
+  ],
+  "lanes": [
+   "pulse1",
+   "pulse2",
+   "triangle",
+   "noise"
+  ],
+  "crush": {
+   "bits": [
+    8,
+    3
+   ],
+   "hold": [
+    1,
+    14
+   ]
+  },
+  "gate": {
+   "rate": 12,
+   "depth": [
+    0.0,
+    0.6
+   ]
+  },
+  "why": "shatter: the whole band breaks apart before bow puts it back together"
+ }
+]

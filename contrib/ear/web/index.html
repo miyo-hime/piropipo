@@ -1,0 +1,960 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Ear</title>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<style>
+  :root { color-scheme: dark; }
+  body { background: #0b1020; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  svg text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .band0 { fill: #ffffff05; } .band1 { fill: #ffffff0c; }
+  .gl { stroke: #94a3b8; } .gl.w4 { stroke-opacity: .7; stroke-width: 1.5; } .gl.w3 { stroke-opacity: .38; }
+  .gl.w2 { stroke-opacity: .16; } .gl.w1 { stroke-opacity: .07; } .gl.w0 { stroke-opacity: .04; }
+  .barhit { fill: #1e293b; cursor: pointer; } .barhit:hover { fill: #334155; } .barhit.sel { fill: #713f12; }
+  .note { cursor: pointer; stroke: #0b1020; stroke-width: .75; }
+  .note.on { stroke: #fff; stroke-width: 2; filter: brightness(1.35); }
+  .note.sel { stroke: #fde047; stroke-width: 2.5; }
+  .oct { stroke: #475569; stroke-dasharray: 2 3; stroke-opacity: .6; }
+  .cellbad { fill: #b4530988; } .cellon { fill: #e2e8f0; font-weight: 700; } .celloff { fill: #64748b; }
+  .ph { stroke: #fde047; stroke-width: 2; }
+  .seg button[aria-pressed="true"] { background: #334155; color: #fff; }
+  .chip { border-radius: 9999px; padding: 1px 8px; font-size: 11px; }
+  details > summary { cursor: pointer; }
+  .finding[aria-current="true"] { outline: 1px solid #fde047; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; } ::-webkit-scrollbar-thumb { background: #334155; border-radius: 6px; }
+</style>
+</head>
+<body class="text-slate-200 text-sm">
+
+<header class="sticky top-0 z-30 bg-[#0b1020f2] backdrop-blur border-b border-slate-800">
+  <div class="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2">
+    <div class="font-semibold tracking-wide text-slate-100">the ear</div>
+    <select id="song" class="bg-slate-900 border border-slate-700 rounded px-2 py-1"></select>
+    <label class="text-slate-400 text-xs">vs</label>
+    <select id="vs" class="bg-slate-900 border border-slate-700 rounded px-2 py-1"><option value="">nothing</option></select>
+    <button id="ab" class="hidden rounded bg-indigo-700 hover:bg-indigo-600 px-2 py-1 text-xs" title="swap to the other version without stopping (key: B)">hearing A</button>
+    <span class="w-px h-5 bg-slate-700"></span>
+    <button id="play" class="rounded bg-emerald-700 hover:bg-emerald-600 px-3 py-1 font-medium" title="space">▶ play</button>
+    <button id="playsec" class="rounded bg-slate-800 hover:bg-slate-700 px-2 py-1 text-xs">section</button>
+    <button id="playall" class="rounded bg-slate-800 hover:bg-slate-700 px-2 py-1 text-xs">whole minute</button>
+    <label class="flex items-center gap-1 text-xs"><input id="loop" type="checkbox" checked> loop</label>
+    <label class="flex items-center gap-1 text-xs"><input id="follow" type="checkbox" checked> follow</label>
+    <span id="rangelabel" class="mono text-xs text-amber-300"></span>
+    <span id="loopn" class="mono text-xs text-slate-400"></span>
+  </div>
+  <div class="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 pb-2 text-xs">
+    <div id="lanes" class="flex items-center gap-2"></div>
+    <div class="seg flex items-center gap-1" id="colormode">
+      <span class="text-slate-400 mr-1">color</span>
+      <button data-color="tension" class="rounded px-2 py-0.5 bg-slate-900">tension</button>
+      <button data-color="role" class="rounded px-2 py-0.5 bg-slate-900">chord role</button>
+      <button data-color="fifths" class="rounded px-2 py-0.5 bg-slate-900">circle of fifths</button>
+    </div>
+    <div class="seg flex items-center gap-1" id="permode">
+      <span class="text-slate-400 mr-1">bars per row</span>
+      <button data-per="1" class="rounded px-2 py-0.5 bg-slate-900">1</button>
+      <button data-per="2" class="rounded px-2 py-0.5 bg-slate-900">2</button>
+      <button data-per="4" class="rounded px-2 py-0.5 bg-slate-900">4</button>
+    </div>
+    <div class="flex items-center gap-1"><span class="text-slate-400">zoom</span>
+      <button id="zout" class="rounded px-2 py-0.5 bg-slate-900">−</button><button id="zfit" class="rounded px-2 py-0.5 bg-slate-900">fit</button><button id="zin" class="rounded px-2 py-0.5 bg-slate-900">+</button></div>
+    <span id="status" class="text-slate-500"></span>
+  </div>
+</header>
+
+<div id="banner" class="hidden mx-4 mt-3 rounded border border-rose-700 bg-rose-950/60 px-3 py-2 text-rose-200 whitespace-pre-wrap mono text-xs"></div>
+
+<section class="px-4 pt-3">
+  <div class="flex items-baseline justify-between">
+    <div><span id="title" class="text-lg font-semibold text-slate-100"></span> <span id="subtitle" class="text-slate-400 text-xs ml-2"></span></div>
+    <div class="text-xs text-slate-500" id="ovlegend"></div>
+  </div>
+  <div id="overview" class="mt-1"></div>
+</section>
+
+<nav id="tabs" class="px-4 mt-2 flex flex-wrap gap-1"></nav>
+
+<div class="flex gap-4 px-4 pb-24 mt-3">
+  <main id="score" class="flex-1 min-w-0"></main>
+  <aside id="side" class="w-[350px] shrink-0 sticky top-[92px] self-start max-h-[calc(100vh-100px)] overflow-y-auto space-y-3 pr-1">
+    <div class="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+      <div class="flex items-baseline justify-between"><h3 class="font-semibold">circle of fifths</h3><span id="keyname" class="text-xs text-slate-400"></span></div>
+      <svg id="cof" viewBox="0 0 280 280" class="w-full"></svg>
+      <div id="now" class="mono text-xs text-slate-300 min-h-[48px]"></div>
+    </div>
+    <div id="selbox" class="hidden rounded-lg border border-yellow-700/60 bg-slate-900/60 p-3 text-xs"></div>
+    <div class="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+      <div class="flex items-center justify-between gap-2">
+        <h3 class="font-semibold">what the ear thinks</h3>
+        <div class="flex gap-2 text-xs">
+          <label class="flex items-center gap-1"><input type="checkbox" data-ff="warn" checked><span id="nwarn">warnings</span></label>
+          <label class="flex items-center gap-1"><input type="checkbox" data-ff="info"><span id="ninfo">notes</span></label>
+        </div>
+      </div>
+      <div id="findings" class="mt-2 space-y-1.5"></div>
+    </div>
+    <div class="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+      <h3 class="font-semibold">lines against each other</h3>
+      <p class="text-xs text-slate-400 mt-1">Below the diagonal: how much the <b>rhythm</b> differs. Above: how much the <b>tune</b> differs once transposition is taken out. Dark is the same. The rule: in any pair of related lines, one of the two should stay dark.</p>
+      <svg id="matrix" class="w-full mt-2"></svg>
+    </div>
+    <details class="rounded-lg border border-slate-800 bg-slate-900/60 p-3 text-xs text-slate-300" id="help">
+      <summary class="font-semibold text-sm text-slate-200">how to read this</summary>
+      <div class="space-y-2 mt-2 leading-relaxed">
+        <p><b>Rows</b> are lines of the tune, stacked so their beats line up: read down a column to compare line 1 with line 2. Each row: the beat ruler (click a bar number to loop that bar, shift-click to loop a run of bars), the chords, the melody (pulse1), your letter notation (amber cells are where this line's rhythm differs from the line it echoes), pulse2, the triangle bass, the noise drums, and a tension strip.</p>
+        <p><b>Beat shading</b>: alternating bands are beat groups (a 7/8 bar is 2+2+3 eighths here, worked out from where the kick and snare land). The strongest line is the downbeat.</p>
+        <p><b>Tension</b> (0 calm to 1 tense) for a note = 0.4 × how far its chord is from home (Lerdahl's chord distance) + 0.4 × how far the note is from its chord (root, fifth, chord tone, scale tone, outside the key) + 0.2 × how hard it rubs against whatever else is sounding. The strip under each row draws it: the colored line is the melody, the blue fill is the chord, dots are surprise (a note the song hasn't taught you to expect yet sits high).</p>
+        <p><b>Lines between melody notes</b>: thickness is how far the jump is in pitch; color is how far it is around the circle of fifths (cool = near, like C to G; hot = far, like C to F#). So C, E and G look alike, and C next to C# looks far.</p>
+        <p><b>Color modes</b>: <i>tension</i> colors notes by the score above; <i>chord role</i> greens chord tones, yellows scale tones outside the chord, reds notes outside the key; <i>circle of fifths</i> gives each pitch a fixed hue around the circle (Scriabin did this), so neighbors on the circle look alike.</p>
+        <p><b>Keys</b>: space play/stop · ← → move the loop a bar · L loop on/off · B swap A/B · 1-4 mute a lane · F follow · + − zoom.</p>
+        <p>Every number here is a first guess, written in <span class="mono">theory.py</span>. When the page and your ear disagree, your ear wins and the formula changes.</p>
+      </div>
+    </details>
+  </aside>
+</div>
+
+<div id="tip" class="fixed z-50 pointer-events-none hidden max-w-sm rounded border border-slate-600 bg-slate-950/95 px-2 py-1.5 mono text-[11px] leading-snug text-slate-200 shadow-xl"></div>
+
+<script>
+"use strict";
+const LANES = ["pulse1", "pulse2", "triangle", "noise"];
+const LANE_NAME = { pulse1: "melody", pulse2: "pulse2", triangle: "bass", noise: "drums" };
+const LANE_COLOR = { pulse1: "#f472b6", pulse2: "#60a5fa", triangle: "#34d399", noise: "#a78bfa" };
+const SHARPS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+const FLATS = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
+const ROLE_COLOR = { "root": "#16a34a", "5th": "#22c55e", "3rd": "#4ade80", "7th": "#2dd4bf", "chord tone": "#4ade80",
+  "scale tone, not in chord": "#facc15", "outside the key": "#f43f5e", "": "#94a3b8" };
+const VERDICT = {
+  "answer": ["bg-emerald-800 text-emerald-100", "answers"], "repeat": ["bg-slate-700 text-slate-200", "repeats"],
+  "near-miss": ["bg-amber-700 text-amber-50", "near miss of"], "contrast": ["bg-sky-900 text-sky-100", "contrasts with"],
+  "rerhythm": ["bg-violet-800 text-violet-100", "re-rhythms"], "cadence": ["bg-emerald-900 text-emerald-100", "cadences on"], "silent": ["bg-slate-800 text-slate-300", "vs"],
+};
+
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const fifthsPos = pc => (pc * 7) % 12;
+
+const S = { index: null, A: null, B: null, sec: 0, per: "2", color: "tension", mute: {}, solo: null, sel: null, range: null,
+  anchor: null, loop: true, follow: true, zoom: 0, ff: { warn: true, info: false }, activeFinding: null, SW: 10, LW: 72, rowGeo: [] };
+const cache = {};
+let ctx = null;
+
+// ------------------------------------------------------------------ colors
+function lerp(a, b, t) { return a + (b - a) * t; }
+function hex(h) { return [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)); }
+const RAMP = [[0, hex("#22d3ee")], [0.45, hex("#facc15")], [1, hex("#f43f5e")]];
+function ramp(v) {
+  v = clamp(v ?? 0, 0, 1);
+  for (let i = 1; i < RAMP.length; i++) {
+    if (v <= RAMP[i][0]) {
+      const [p0, c0] = RAMP[i - 1], [p1, c1] = RAMP[i], t = (v - p0) / (p1 - p0);
+      return `rgb(${c0.map((c, k) => Math.round(lerp(c, c1[k], t))).join(",")})`;
+    }
+  }
+  return "rgb(244,63,94)";
+}
+const fifthsHue = pc => `hsl(${fifthsPos(pc) * 30}, 70%, 62%)`;
+function drumOf(letter) {
+  let pc = SHARPS.indexOf(letter); if (pc < 0) pc = FLATS.indexOf(letter); if (pc < 0) pc = 11;
+  return pc <= 3 ? "kick" : pc <= 7 ? "snare" : "hat";
+}
+const DRUM_COLOR = { kick: "#c084fc", snare: "#fb923c", hat: "#94a3b8" };
+function noteColor(n) {
+  if (n.midi == null) return DRUM_COLOR[drumOf(n.pitch)];
+  if (S.color === "fifths") return fifthsHue(n.midi % 12);
+  if (S.color === "role") return ROLE_COLOR[n.role || ""] || "#94a3b8";
+  return ramp(n.tension);
+}
+const names = () => S.A.a.key.names || (S.A.a.key.flats ? FLATS : SHARPS);
+
+// ------------------------------------------------------------------ data
+async function getIndex() { return (await fetch("data/index.json", { cache: "no-store" })).json(); }
+function ensureCtx() { if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)(); return ctx; }
+
+async function loadSong(id) {
+  const entry = S.index.songs[id];
+  if (!entry) throw new Error(`no song called ${id}`);
+  if (entry.error) throw new Error(`${id} didn't build:\n${entry.error}`);
+  const key = `${id}@${entry.built_at}`;
+  if (cache[key]) return cache[key];
+  status(`loading ${id}…`);
+  const a = await (await fetch(`data/${id}/analysis.json?v=${entry.built_at}`)).json();
+  a.notes.forEach((n, i) => { n.id = i; });
+  status("");
+  // draw now, decode the audio behind it; playback waits on `ready`
+  const song = { a, bufs: {}, id, done: false };
+  const files = a.stems_add_up ? a.audio.stems : { mix: a.audio.mix };
+  song.ready = Promise.all(Object.entries(files).map(async ([lane, f]) => {
+    const raw = await (await fetch(`data/${id}/${f}?v=${entry.built_at}`)).arrayBuffer();
+    song.bufs[lane] = await ensureCtx().decodeAudioData(raw);
+  })).then(() => { song.done = true; });
+  song.ready.catch(err => banner(`couldn't load ${id}'s audio: ${err.message || err}`));
+  return (cache[key] = song);
+}
+
+function status(t) { $("#status").textContent = t; }
+function banner(t) { const b = $("#banner"); b.textContent = t || ""; b.classList.toggle("hidden", !t); }
+
+// ------------------------------------------------------------------ audio
+const P = { nodes: [], songGain: {}, laneGain: {}, playing: false, t0: 0, t1: 0, startedAt: 0, loop: true, lastSlot: null };
+function laneLevel(lane) { if (lane === "mix") return 1; if (S.solo) return S.solo === lane ? 1 : 0; return S.mute[lane] ? 0 : 1; }
+function comparable() {
+  if (!S.B) return false;
+  const a = S.A.a, b = S.B.a;
+  return Math.abs(a.cut_seconds - b.cut_seconds) < 0.01 && a.sections.map(s => s.name).join() === b.sections.map(s => s.name).join();
+}
+async function startPlayback(t0, t1) {
+  const c = ensureCtx(); c.resume();
+  const songs = [S.A]; if (comparable()) songs.push(S.B);
+  if (songs.some(s => !s.done)) {
+    status("decoding audio…");
+    await Promise.all(songs.map(s => s.ready));
+    status("");
+  }
+  stopPlayback(true);
+  const when = c.currentTime + 0.06;
+  P.songGain = {}; P.laneGain = {};
+  for (const song of songs) {
+    const sg = c.createGain(); sg.gain.value = song === S.A ? 1 : 0; sg.connect(c.destination); P.songGain[song.id] = sg;
+    for (const [lane, buf] of Object.entries(song.bufs)) {
+      const lg = c.createGain(); lg.gain.value = laneLevel(lane); lg.connect(sg);
+      (P.laneGain[lane] = P.laneGain[lane] || []).push(lg);
+      const src = c.createBufferSource(); src.buffer = buf; src.connect(lg);
+      if (S.loop) { src.loop = true; src.loopStart = t0; src.loopEnd = Math.min(t1, buf.duration); src.start(when, t0); }
+      else src.start(when, t0, t1 - t0);
+      P.nodes.push(src);
+    }
+  }
+  Object.assign(P, { playing: true, t0, t1, startedAt: when, loop: S.loop });
+  $("#play").textContent = "■ stop";
+  requestAnimationFrame(tick);
+}
+function stopPlayback(quiet) {
+  for (const n of P.nodes) { try { n.stop(); } catch (e) { /* already stopped */ } }
+  P.nodes = []; P.playing = false; P.lastSlot = null;
+  if (!quiet) { $("#play").textContent = "▶ play"; $("#loopn").textContent = ""; drawPlayhead(null); }
+}
+function applyLaneGains() {
+  for (const [lane, gains] of Object.entries(P.laneGain)) for (const g of gains) g.gain.setTargetAtTime(laneLevel(lane), ctx.currentTime, 0.01);
+}
+function position() {
+  if (!P.playing) return null;
+  const el = ctx.currentTime - P.startedAt, len = P.t1 - P.t0;
+  if (el < 0) return { t: P.t0, n: 1 };
+  if (P.loop) return { t: P.t0 + (el % len), n: Math.floor(el / len) + 1 };
+  if (el >= len) return null;
+  return { t: P.t0 + el, n: 1 };
+}
+function tick() {
+  if (!P.playing) return;
+  const p = position();
+  if (!p) { stopPlayback(); return; }
+  drawPlayhead(p.t);
+  $("#loopn").textContent = P.loop ? `loop ${p.n}` : `${p.t.toFixed(1)}s`;
+  requestAnimationFrame(tick);
+}
+function playRange() {
+  const r = S.range || sectionRange(S.sec);
+  if (!S.range) setRange(r);
+  startPlayback(r.t0, r.t1);
+}
+function sectionRange(i) {
+  const sec = S.A.a.sections[i];
+  return { sec: i, from: 1, to: sec.bars.length, t0: sec.t0, t1: sec.t1, label: `${sec.name}, all ${sec.bars.length} bars` };
+}
+function barsRange(i, from, to) {
+  const sec = S.A.a.sections[i];
+  [from, to] = [Math.min(from, to), Math.max(from, to)];
+  const label = from === to ? `${sec.name} |${from}` : `${sec.name} |${from}–|${to}`;
+  return { sec: i, from, to, t0: sec.bars[from - 1].t0, t1: sec.bars[to - 1].t1, label };
+}
+function setRange(r, andPlay) {
+  S.range = r;
+  $("#rangelabel").textContent = r ? `⟲ ${r.label}` : "";
+  markRange(); renderOverview(); writeHash();
+  if (andPlay) startPlayback(r.t0, r.t1);
+  else if (P.playing) startPlayback(r.t0, r.t1);
+}
+function shiftRange(d) {
+  const a = S.A.a;
+  let r = S.range && S.range.sec != null ? S.range : barsRange(S.sec, 1, 1);
+  const span = r.to - r.from;
+  let i = r.sec, from = r.from + d;
+  if (from < 1) { if (i === 0) return; i -= 1; from = a.sections[i].bars.length - span; }
+  else if (from + span > a.sections[i].bars.length) { if (i === a.sections.length - 1) return; i += 1; from = 1; }
+  from = Math.max(1, from);
+  const to = Math.min(a.sections[i].bars.length, from + span);
+  if (i !== S.sec) { S.sec = i; renderSection(); renderTabs(); renderMatrix(); }
+  setRange(barsRange(i, from, to));
+  scrollToBar(from);
+}
+
+// ------------------------------------------------------------------ geometry helpers
+function sectionAt(t) { const a = S.A.a; return a.sections.findIndex(s => t >= s.t0 - 1e-9 && t < s.t1 - 1e-9); }
+function barOf(sec, slot) { return sec.bars.find(b => slot >= b.start && slot < b.start + b.len) || sec.bars[sec.bars.length - 1]; }
+function where(sec, slot) {
+  const b = barOf(sec, slot), o = slot - b.start;
+  const unit = b.denom === 8 ? "eighth" : "beat";
+  const beat = Math.floor(o / b.pulse) + 1, off = o % b.pulse;
+  return `|${b.n} ${unit} ${beat}${off ? ` +${off}/${b.pulse}` : ""}`;
+}
+function chordAt(sec, slot) { return sec.chords.find(c => slot >= c.start && slot < c.start + c.len); }
+function pitchName(m) { return `${names()[m % 12]}${Math.floor(m / 12) - 1}`; }
+
+// ------------------------------------------------------------------ overview
+function renderOverview() {
+  const a = S.A.a, box = $("#overview");
+  const W = box.clientWidth, H = 156, top = 22, ch = 104;
+  const x = t => (t / a.cut_seconds) * W, y = v => top + 6 + ch - clamp(v, 0, 1) * ch;
+  let s = `<svg width="${W}" height="${H}" class="block select-none">`;
+  a.sections.forEach((sec, i) => {
+    const cur = i === S.sec;
+    s += `<rect data-act="sec" data-sec="${i}" x="${x(sec.t0)}" y="0" width="${x(sec.t1) - x(sec.t0) - 1}" height="${top - 4}" rx="3" fill="${cur ? "#334155" : i % 2 ? "#1e293b" : "#172033"}" class="cursor-pointer"/>`;
+    s += `<text x="${x(sec.t0) + 5}" y="13" font-size="11" fill="${cur ? "#fff" : "#94a3b8"}" pointer-events="none">${esc(sec.name)}</text>`;
+    s += `<line x1="${x(sec.t0)}" x2="${x(sec.t0)}" y1="${top}" y2="${top + ch + 8}" stroke="#334155"/>`;
+  });
+  if (S.range) s += `<rect x="${x(S.range.t0)}" y="${top}" width="${Math.max(2, x(S.range.t1) - x(S.range.t0))}" height="${ch + 8}" fill="#fde04718"/>`;
+  for (const b of a.timeline) {
+    if (b.harmonic_tension != null) s += `<rect x="${x(b.t0)}" y="${y(b.harmonic_tension)}" width="${Math.max(1, x(b.t1) - x(b.t0))}" height="${top + 6 + ch - y(b.harmonic_tension)}" fill="#3b82f633"/>`;
+  }
+  const line = (key, map, attrs) => {
+    let d = "", pen = false;
+    for (const b of a.timeline) {
+      const v = b[key];
+      if (v == null) { pen = false; continue; }
+      const xx = (x(b.t0) + x(b.t1)) / 2, yy = y(map ? map(v) : v);
+      d += `${pen ? "L" : "M"}${xx.toFixed(1)},${yy.toFixed(1)} `; pen = true;
+    }
+    return `<path d="${d}" fill="none" ${attrs}/>`;
+  };
+  s += line("loudness_db", v => (v + 36) / 36, `stroke="#64748b" stroke-width="1"`);
+  s += line("load", null, `stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="4 3"`);
+  s += line("melodic_tension", null, `stroke="#f472b6" stroke-width="2.2"`);
+  for (const b of a.timeline) {
+    s += `<rect data-act="tbar" data-sec="${b.section}" data-bar="${b.bar}" x="${x(b.t0)}" y="${top}" width="${Math.max(1, x(b.t1) - x(b.t0))}" height="${ch + 8}" fill="transparent" class="cursor-pointer"><title>${esc(a.sections[b.section].name)} |${b.bar}: melody tension ${fmt(b.melodic_tension)}, chord tension ${fmt(b.harmonic_tension)}, load ${fmt(b.load)}, ${b.loudness_db} dB</title></rect>`;
+  }
+  for (const f of a.findings) {
+    if (!S.ff[f.severity]) continue;
+    const xx = x(f.t0);
+    s += `<path data-act="finding" data-id="${esc(f.id)}" d="M${xx},${H - 2} l5,-9 l5,9 z" transform="translate(-5,0)" fill="${f.severity === "warn" ? "#f59e0b" : "#64748b"}" class="cursor-pointer"><title>${esc(f.title)}</title></path>`;
+  }
+  s += `<line id="ovph" x1="-10" x2="-10" y1="0" y2="${H}" class="ph"/>`;
+  s += `</svg>`;
+  box.innerHTML = s;
+  $("#ovlegend").innerHTML = `<span style="color:#f472b6">━ melody tension</span> · <span style="color:#60a5fa">▇ chord tension</span> · <span class="text-slate-200">┅ load</span> · <span style="color:#64748b">━ loudness</span> · <span style="color:#f59e0b">▲ findings</span>`;
+}
+const fmt = v => (v == null ? "–" : (+v).toFixed(2));
+
+// ------------------------------------------------------------------ tabs
+function renderTabs() {
+  const a = S.A.a;
+  $("#tabs").innerHTML = a.sections.map((sec, i) => {
+    const warns = a.findings.filter(f => f.section === i && f.severity === "warn").length;
+    const meters = [...new Set(sec.bars.map(b => b.meter))].join(" ");
+    return `<button data-act="sec" data-sec="${i}" class="rounded px-3 py-1 text-xs border ${i === S.sec ? "bg-slate-700 border-slate-500 text-white" : "bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800"}">
+      <b>${esc(sec.name)}</b> <span class="text-slate-400">${meters} · ${sec.t0.toFixed(1)}–${sec.t1.toFixed(1)}s</span>${warns ? ` <span class="text-amber-400">▲${warns}</span>` : ""}</button>`;
+  }).join("");
+}
+
+// ------------------------------------------------------------------ the score
+function laneRange(notes) {
+  const ms = notes.flatMap(n => (n.arp ? n.arp.map(o => n.midi + o) : [n.midi])).filter(m => m != null);
+  return ms.length ? [Math.min(...ms), Math.max(...ms)] : null;
+}
+
+function renderSection() {
+  const a = S.A.a, sec = a.sections[S.sec], lay = sec.layouts[S.per];
+  const notes = a.notes.filter(n => n.section === sec.index);
+  const by = {}; LANES.forEach(l => { by[l] = notes.filter(n => n.lane === l); });
+  const rng = { pulse1: laneRange(by.pulse1), pulse2: laneRange(by.pulse2), triangle: laneRange(by.triangle) };
+  const LW = S.LW, colW = $("#score").clientWidth;
+  const maxLen = Math.max(...lay.rows.map(r => r.len));
+  const SW = S.zoom || clamp(Math.floor((colW - LW - 10) / maxLen), 5, 34);
+  S.SW = SW;
+  const semi = {}, laneH = {};
+  for (const [l, cap, min, mx] of [["pulse1", 170, 70, 11], ["pulse2", 64, 30, 5], ["triangle", 44, 26, 5]]) {
+    if (!rng[l]) { laneH[l] = 0; continue; }
+    const span = rng[l][1] - rng[l][0] + 1;
+    semi[l] = clamp(Math.floor(cap / span), 3, mx);
+    laneH[l] = Math.max(min, span * semi[l] + 8);
+  }
+  const H = { ruler: 30, chord: 20, cells: 20, noise: by.noise.length ? 26 : 0, ten: 46 };
+  const groups = [...new Set(sec.bars.map(b => `${b.meter} (${b.groups.join("+")})`))].join(", ");
+  const warns = a.findings.filter(f => f.section === S.sec && f.severity === "warn").length;
+  let html = `<div class="mb-3 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+    <h2 class="text-base font-semibold text-white">${esc(sec.name)}</h2>
+    <span class="text-xs text-slate-400">${sec.bars.length} bars · ${groups} · local key ${esc(sec.key.name)} · ${sec.t0.toFixed(2)}–${sec.t1.toFixed(2)}s · score line ${sec.line}</span>
+    <span class="text-xs text-slate-500">barlines from ${esc(sec.meter_source)}${sec.meter_comment ? ` <span class="mono">${esc(sec.meter_comment)}</span>` : ""}; beat groups inferred from the drums</span>
+    ${warns ? `<span class="text-xs text-amber-400">▲ ${warns} warning${warns > 1 ? "s" : ""}</span>` : ""}
+  </div>`;
+  S.rowGeo = [];
+  lay.rows.forEach((row, k) => { html += rowHTML(a, sec, row, k, by, rng, semi, laneH, H, SW, LW, lay); });
+  $("#score").innerHTML = html;
+  S.rowEls = lay.rows.map((row, k) => ({ el: $(`#row${k}`), notes: $$(`#row${k} [data-note]`), ph: $(`#ph${k}`) }));
+  markRange(); markSel();
+}
+
+function rowHTML(a, sec, row, k, by, rng, semi, laneH, H, SW, LW, lay) {
+  const r0 = row.start, r1 = row.start + row.len;
+  const x = s => LW + (s - r0) * SW;
+  const W = LW + row.len * SW + 6;
+  let y = 0;
+  const yR = y; y += H.ruler;
+  const yC = y; y += H.chord;
+  const yM = y; y += laneH.pulse1;
+  const yX = y; y += H.cells;
+  const yP2 = y + 4; y += laneH.pulse2 ? laneH.pulse2 + 4 : 0;
+  const yT = y + 4; y += laneH.triangle ? laneH.triangle + 4 : 0;
+  const yN = y + 4; y += H.noise ? H.noise + 4 : 0;
+  const yTen = y + 4; y += H.ten + 6;
+  const total = y;
+  S.rowGeo[k] = { r0, r1 };
+  const bars = row.bars.map(n => sec.bars[n - 1]);
+  const over = n => n.start < r1 && n.start + n.len > r0;
+  let s = "";
+
+  // beat-group bands and grid lines
+  for (const b of bars) {
+    let acc = 0;
+    b.groups.forEach((g, gi) => {
+      const s0 = b.start + acc * b.pulse; acc += g;
+      s += `<rect x="${x(s0)}" y="${yC}" width="${g * b.pulse * SW}" height="${total - yC}" class="band${gi % 2}"/>`;
+    });
+  }
+  for (const b of bars) b.weights.forEach((w, o) => {
+    if (w === 0 && SW < 10) return;
+    const xx = x(b.start + o);
+    s += `<line x1="${xx}" x2="${xx}" y1="${yC}" y2="${total}" class="gl w${w}"/>`;
+  });
+  const xe = x(r1); s += `<line x1="${xe}" x2="${xe}" y1="${yC}" y2="${total}" class="gl w4"/>`;
+
+  // ruler
+  for (const b of bars) {
+    s += `<rect data-act="bar" data-bar="${b.n}" x="${x(b.start) + 1}" y="${yR}" width="${b.len * SW - 2}" height="${H.ruler - 6}" rx="3" class="barhit" id="bh${b.n}"><title>loop |${b.n} (shift-click to loop a run of bars)</title></rect>`;
+    s += `<text x="${x(b.start) + 5}" y="${yR + 12}" font-size="11" font-weight="700" fill="#e2e8f0" pointer-events="none">|${b.n}</text>`;
+    s += `<text x="${x(b.start + b.len) - 4}" y="${yR + 11}" font-size="9" fill="#64748b" text-anchor="end" pointer-events="none">${b.meter} ${b.groups.join("+")}</text>`;
+    let acc = 0;
+    b.groups.forEach((g, gi) => {
+      for (let p = 0; p < g; p++) {
+        const o = (acc + p) * b.pulse, xx = x(b.start + o);
+        const big = p === 0;
+        s += `<line x1="${xx}" x2="${xx}" y1="${yR + H.ruler - 6}" y2="${yR + H.ruler - 6 - (gi === 0 && p === 0 ? 9 : big ? 6 : 3)}" stroke="#cbd5e1" stroke-width="${big ? 1.5 : 1}" pointer-events="none"/>`;
+        if (big && SW * b.pulse >= 10) s += `<text x="${xx + 2}" y="${yR + H.ruler - 9}" font-size="8" fill="#94a3b8" pointer-events="none">${gi + 1}</text>`;
+      }
+      acc += g;
+    });
+  }
+
+  // chords
+  for (const c of sec.chords) {
+    if (!(c.start < r1 && c.start + c.len > r0) || !c.label) continue;
+    const s0 = Math.max(c.start, r0), s1 = Math.min(c.start + c.len, r1);
+    s += `<rect x="${x(s0) + 1}" y="${yC + 2}" width="${(s1 - s0) * SW - 2}" height="${H.chord - 4}" rx="3" fill="${ramp(c.tension)}" fill-opacity=".28" stroke="${ramp(c.tension)}" stroke-opacity=".6"><title>${esc(c.label)}: ${c.pcs.map(p => names()[p]).join(" ")} · ${c.tension_raw} steps from home (Lerdahl) → tension ${fmt(c.tension)}</title></rect>`;
+    if ((s1 - s0) * SW > 22) s += `<text x="${x(s0) + 5}" y="${yC + 14}" font-size="11" font-weight="600" fill="#f8fafc" pointer-events="none">${esc(c.label)}</text>`;
+  }
+
+  // lane labels
+  const lab = (t, yy, col) => `<text x="4" y="${yy}" font-size="10" fill="${col}">${t}</text>`;
+  s += lab("chords", yC + 14, "#94a3b8");
+
+  // a piano-roll lane
+  const roll = (lane, y0, h, sm, isMel) => {
+    if (!h) return "";
+    const [lo, hi] = rng[lane];
+    const top = y0 + 4 + (h - 8 - (hi - lo + 1) * sm) / 2;
+    const yOf = m => top + (hi - m) * sm;
+    let o = lab(LANE_NAME[lane], y0 + 12, LANE_COLOR[lane]) + lab(lane === "pulse1" ? "pulse1" : lane === "triangle" ? "triangle" : "", y0 + 24, "#475569");
+    for (let m = lo; m <= hi; m++) if (m % 12 === 0) {
+      o += `<line x1="${LW}" x2="${xe}" y1="${yOf(m) + sm / 2}" y2="${yOf(m) + sm / 2}" class="oct"/><text x="${LW - 3}" y="${yOf(m) + sm / 2 + 3}" font-size="8" fill="#64748b" text-anchor="end">C${m / 12 - 1}</text>`;
+    }
+    const ns = by[lane].filter(over);
+    if (isMel) {
+      const mel = by[lane];
+      for (const n of ns) {
+        const i = mel.indexOf(n); if (i <= 0) continue;
+        const p = mel[i - 1];
+        if (p.start < r0 && p.start + p.len < r0 - 1) continue;
+        // a jump in from the previous row starts at this row's left edge
+        const x1 = p.start < r0 ? LW : x(p.start + Math.min(p.len, r1 - p.start) / 2), y1 = yOf(p.midi) + sm / 2;
+        const x2 = x(n.start + Math.min(n.len, r1 - n.start) / 2), y2 = yOf(n.midi) + sm / 2;
+        const fj = n.fifths_jump ?? 0;
+        o += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${ramp(fj / 6)}" stroke-width="${1 + Math.min(Math.abs(n.interval || 0), 12) / 2.5}" stroke-opacity=".55" stroke-linecap="round" pointer-events="none"/>`;
+      }
+    }
+    for (const n of ns) {
+      const s0 = Math.max(n.start, r0), s1 = Math.min(n.start + n.len, r1);
+      const xx = x(s0), ww = Math.max(2, (s1 - s0) * SW - 1), yy = yOf(n.midi);
+      if (n.arp) for (const off of n.arp) if (off) {
+        o += `<rect x="${xx}" y="${yOf(n.midi + off) + sm / 2 - 1}" width="${ww}" height="2" fill="${LANE_COLOR[lane]}" fill-opacity=".55" pointer-events="none"/>`;
+      }
+      o += `<rect data-note="${n.id}" data-s="${n.start}" data-e="${n.start + n.len}" x="${xx}" y="${yy}" width="${ww}" height="${Math.max(2, sm - 1)}" rx="${Math.min(3, sm / 3)}" fill="${noteColor(n)}" class="note${n.start < r0 ? " cont" : ""}"/>`;
+      if (isMel && sm >= 7 && ww >= 14 && n.start >= r0) o += `<text x="${xx + 2}" y="${yy + sm - 2}" font-size="${Math.min(10, sm)}" fill="#0b1020" font-weight="700" pointer-events="none">${esc(names()[n.midi % 12])}</text>`;
+      const w = n.worst_rub;
+      if (isMel && w && w.r >= 0.75 && w.first < r1) {
+        const a0 = Math.max(w.first, r0), a1 = Math.min(w.first + w.slots, r1);
+        if (a1 > a0) {
+          let zz = `M${x(a0)},${yy + sm + 2}`;
+          for (let xx2 = x(a0); xx2 < x(a1); xx2 += 4) zz += ` l2,2 l2,-2`;
+          o += `<path d="${zz}" stroke="#f43f5e" stroke-width="1.5" fill="none" pointer-events="none"/>`;
+        }
+      }
+    }
+    return o;
+  };
+  s += roll("pulse1", yM, laneH.pulse1, semi.pulse1, true);
+
+  // the letter notation, with the cells where this line's rhythm differs from the one it echoes
+  const cells = row.cells.pulse1;
+  if (cells) {
+    const cw = cells.cell * SW;
+    const bad = new Set();
+    const v = row.vs_prev;
+    if (v && ["near-miss", "rerhythm"].includes(v.kind)) for (const o of [...(v.only_a || []), ...(v.only_b || [])]) bad.add(Math.floor(o / cells.cell));
+    s += lab("letters", yX + 14, "#94a3b8");
+    cells.cells.forEach((c, i) => {
+      const xx = LW + i * cw;
+      if (bad.has(i)) s += `<rect x="${xx}" y="${yX + 2}" width="${cw}" height="${H.cells - 4}" class="cellbad" rx="2"><title>line ${k} and line ${k + 1} disagree about a note starting here</title></rect>`;
+      if (cw >= 9 || c.on) s += `<text x="${xx + cw / 2}" y="${yX + 14}" font-size="${clamp(cw - 2, 7, 12)}" text-anchor="middle" class="${c.on ? "cellon" : "celloff"}" pointer-events="none">${esc(c.t)}</text>`;
+    });
+  }
+
+  s += roll("pulse2", yP2, laneH.pulse2, semi.pulse2, false);
+  s += roll("triangle", yT, laneH.triangle, semi.triangle, false);
+
+  // drums
+  if (H.noise) {
+    s += lab("drums", yN + 14, LANE_COLOR.noise);
+    for (const n of by.noise.filter(over)) {
+      const s0 = Math.max(n.start, r0), s1 = Math.min(n.start + n.len, r1);
+      const hh = Math.max(3, ((n.vol ?? 8) / 15) * (H.noise - 4));
+      s += `<rect data-note="${n.id}" data-s="${n.start}" data-e="${n.start + n.len}" x="${x(s0)}" y="${yN + H.noise - hh}" width="${Math.max(2, (s1 - s0) * SW - 1)}" height="${hh}" fill="${DRUM_COLOR[drumOf(n.pitch)]}" fill-opacity="${n.fade ? 0.65 : 0.95}" class="note"/>`;
+    }
+  }
+
+  // tension strip
+  const ty = v => yTen + H.ten - 2 - clamp(v, 0, 1) * (H.ten - 6);
+  s += `<rect x="${LW}" y="${yTen}" width="${row.len * SW}" height="${H.ten}" fill="#0f172a" stroke="#1e293b"/>`;
+  s += `<line x1="${LW}" x2="${xe}" y1="${ty(0.5)}" y2="${ty(0.5)}" stroke="#334155" stroke-dasharray="2 3"/>`;
+  s += lab("tension", yTen + 14, "#94a3b8");
+  for (const c of sec.chords) {
+    if (!(c.start < r1 && c.start + c.len > r0) || c.root == null) continue;
+    const s0 = Math.max(c.start, r0), s1 = Math.min(c.start + c.len, r1);
+    s += `<rect x="${x(s0)}" y="${ty(c.tension)}" width="${(s1 - s0) * SW}" height="${yTen + H.ten - 2 - ty(c.tension)}" fill="#3b82f633" pointer-events="none"/>`;
+  }
+  for (const n of by.pulse1.filter(over)) {
+    if (n.tension == null) continue;
+    const s0 = Math.max(n.start, r0), s1 = Math.min(n.start + n.len, r1);
+    s += `<line x1="${x(s0) + 1}" x2="${x(s1) - 1}" y1="${ty(n.tension)}" y2="${ty(n.tension)}" stroke="${ramp(n.tension)}" stroke-width="3" stroke-linecap="round"/>`;
+    if (n.surprise != null && n.start >= r0) s += `<circle cx="${x(n.start) + 2}" cy="${ty(n.surprise / 8.6)}" r="2" fill="#e2e8f0" fill-opacity=".7"><title>surprise ${n.surprise.toFixed(1)} bits</title></circle>`;
+  }
+
+  s += `<line id="ph${k}" x1="-20" x2="-20" y1="0" y2="${total}" class="ph" visibility="hidden"/>`;
+
+  // header: this line against the one before it, and any earlier line it reprises
+  const chipFor = (v, ref, lead) => {
+    const [cls, word] = VERDICT[v.kind] || VERDICT.silent;
+    const extra = v.kind === "repeat" && v.dress && v.dress.length ? ` (${v.dress.join(", ")})` : "";
+    return `<span class="chip ${cls}" title="${esc(v.words)} Rhythm: ${Math.round(v.rhythm * 100)}% of note starts differ. Tune: ${v.contour == null ? "–" : Math.round(v.contour * 100) + "%"} different after moving it ${v.shift} semitones.">${lead}${word} line ${ref + 1}${esc(extra)}</span>
+            <span class="text-slate-500">rhythm ${Math.round(v.rhythm * 100)}% · tune ${v.contour == null ? "–" : Math.round(v.contour * 100)}%${v.shift ? ` · moved ${v.shift > 0 ? "+" : ""}${v.shift}` : ""}</span>`;
+  };
+  let chip = "";
+  if (row.vs_prev) chip += chipFor(row.vs_prev, k - 1, "");
+  if (row.echo) {
+    const e = row.echo;
+    chip += `<span class="text-slate-600">·</span>` + (e.kind === "repeat" ? chipFor(e, e.ref, "")
+      : `<span class="chip bg-slate-800 text-slate-300" title="Its first bar is line ${e.ref + 1}'s first bar; after that, rhythm ${Math.round(e.rhythm * 100)}% and tune ${Math.round((e.contour || 0) * 100)}% different.">opens like line ${e.ref + 1}</span>`);
+  }
+  const label = row.bars.length > 1 ? `|${row.bars[0]}–|${row.bars[row.bars.length - 1]}` : `|${row.bars[0]}`;
+  return `<div id="row${k}" class="mb-4 rounded-lg border border-slate-800 bg-slate-900/40 p-2" data-row="${k}">
+    <div class="flex flex-wrap items-center gap-2 text-xs mb-1">
+      <button data-act="row" data-row="${k}" class="rounded bg-slate-800 hover:bg-slate-700 px-2 py-0.5 font-semibold" title="loop this line">⟲ line ${k + 1}</button>
+      <span class="mono text-slate-400">${label}</span>${chip}
+    </div>
+    <div class="overflow-x-auto"><svg width="${W}" height="${total}" class="block select-none">${s}</svg></div>
+  </div>`;
+}
+
+function markRange() {
+  $$(".barhit.sel").forEach(e => e.classList.remove("sel"));
+  const r = S.range;
+  if (!r || r.sec !== S.sec) return;
+  for (let n = r.from; n <= r.to; n++) { const e = $(`#bh${n}`); if (e) e.classList.add("sel"); }
+}
+function markSel() {
+  $$(".note.sel").forEach(e => e.classList.remove("sel"));
+  if (S.sel != null) $$(`[data-note="${S.sel}"]`).forEach(e => e.classList.add("sel"));
+}
+function scrollToBar(n) {
+  const lay = S.A.a.sections[S.sec].layouts[S.per];
+  const k = lay.rows.findIndex(r => r.bars.includes(n));
+  const el = $(`#row${k}`); if (el) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+// ------------------------------------------------------------------ playhead and "now"
+let lastRow = -1, lastSecShown = -1;
+function drawPlayhead(t) {
+  const ov = $("#ovph");
+  if (t == null) {
+    if (ov) ov.setAttribute("x1", -10), ov.setAttribute("x2", -10);
+    (S.rowEls || []).forEach(r => { if (r.ph) r.ph.setAttribute("visibility", "hidden"); r.notes.forEach(e => e.classList.remove("on")); });
+    lastRow = -1;
+    return;
+  }
+  const a = S.A.a;
+  const W = $("#overview").clientWidth, xx = (t / a.cut_seconds) * W;
+  if (ov) { ov.setAttribute("x1", xx); ov.setAttribute("x2", xx); }
+  const si = sectionAt(t);
+  if (si < 0) return;
+  if (si !== S.sec) {
+    if (!S.follow) { (S.rowEls || []).forEach(r => r.ph && r.ph.setAttribute("visibility", "hidden")); return; }
+    S.sec = si; renderSection(); renderTabs(); renderOverview(); renderMatrix(); renderFindings();
+  }
+  const sec = a.sections[si];
+  const slotF = (t - sec.t0) / sec.slot_seconds, slot = Math.floor(slotF + 1e-6);
+  const k = S.rowGeo.findIndex(g => slot >= g.r0 && slot < g.r1);
+  if (k < 0) return;
+  if (k !== lastRow) {
+    (S.rowEls || []).forEach((r, i) => { if (i !== k && r.ph) r.ph.setAttribute("visibility", "hidden"); if (i !== k) r.notes.forEach(e => e.classList.remove("on")); });
+    lastRow = k;
+    if (S.follow) S.rowEls[k].el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+  const r = S.rowEls[k], px = S.LW + (slotF - S.rowGeo[k].r0) * S.SW;
+  r.ph.setAttribute("visibility", "visible"); r.ph.setAttribute("x1", px); r.ph.setAttribute("x2", px);
+  if (slot !== P.lastSlot) {
+    P.lastSlot = slot;
+    for (const e of r.notes) { const s0 = +e.dataset.s, s1 = +e.dataset.e; e.classList.toggle("on", slot >= s0 && slot < s1); }
+    showNow(sec, slot);
+  }
+}
+
+function soundingAt(sec, slot) {
+  return S.A.a.notes.filter(n => n.section === sec.index && slot >= n.start && slot < n.start + n.len);
+}
+function showNow(sec, slot, focus) {
+  const sounding = soundingAt(sec, slot);
+  const mel = focus && focus.lane === "pulse1" ? focus : sounding.find(n => n.lane === "pulse1");
+  const chord = chordAt(sec, slot);
+  updateCircle(sounding, chord, mel);
+  const b = barOf(sec, slot);
+  $("#now").innerHTML = `<div class="flex justify-between"><span>${esc(sec.name)} ${where(sec, slot)}</span><span class="text-slate-400">${chord && chord.label ? `chord <b class="text-slate-100">${esc(chord.label)}</b>` : "no chord"}</span></div>
+    ${mel ? `<div class="mt-1">melody <b style="color:${noteColor(mel)}">${esc(mel.name)}</b> · ${esc(mel.role || "")} · tension <b>${fmt(mel.tension)}</b></div>
+            <div class="mt-0.5 text-slate-500">harmonic ${fmt(mel.harm)} · depth ${fmt(mel.depth)} · rub ${fmt(mel.rub)}${mel.surprise != null ? ` · surprise ${mel.surprise.toFixed(1)} bits` : ""}</div>` : `<div class="mt-1 text-slate-500">melody resting</div>`}`;
+}
+
+// ------------------------------------------------------------------ circle of fifths
+const C0 = 140, R = 104;
+function cpos(pc, r) { const ang = (-90 + fifthsPos(pc) * 30) * Math.PI / 180; return [C0 + r * Math.cos(ang), C0 + r * Math.sin(ang)]; }
+function renderCircleBase() {
+  const k = S.A.a.key, nm = names();
+  const scale = k.mode === "major" ? [0, 2, 4, 5, 7, 9, 11] : [0, 2, 3, 5, 7, 8, 10];
+  const inScale = new Set(scale.map(s => (k.tonic + s) % 12));
+  let s = `<circle cx="${C0}" cy="${C0}" r="${R + 22}" fill="none" stroke="#1e293b" stroke-width="22"/>`;
+  for (let pc = 0; pc < 12; pc++) {
+    const [x, y] = cpos(pc, R + 22);
+    const [x2, y2] = cpos(pc, R);
+    s += `<line x1="${C0}" y1="${C0}" x2="${x2}" y2="${y2}" stroke="#1e293b"/>`;
+    s += `<circle cx="${x}" cy="${y}" r="13" fill="${inScale.has(pc) ? (S.color === "fifths" ? fifthsHue(pc) : "#334155") : "#0f172a"}" fill-opacity="${S.color === "fifths" ? 0.85 : 1}" stroke="${pc === k.tonic ? "#fde047" : "#475569"}" stroke-width="${pc === k.tonic ? 2.5 : 1}"/>`;
+    s += `<text x="${x}" y="${y + 4}" font-size="11" text-anchor="middle" fill="${inScale.has(pc) ? "#f8fafc" : "#64748b"}" font-weight="${inScale.has(pc) ? 700 : 400}">${nm[pc]}</text>`;
+  }
+  s += `<circle cx="${C0}" cy="${C0}" r="${R - 30}" fill="none" stroke="#1e293b" stroke-dasharray="2 4"/>`;
+  s += `<g id="cofdyn"></g>`;
+  $("#cof").innerHTML = s;
+  $("#keyname").textContent = `key ${k.name} (bold = in the key)`;
+}
+function updateCircle(sounding, chord, mel) {
+  const g = $("#cofdyn"); if (!g) return;
+  let s = "";
+  if (chord && chord.pcs && chord.pcs.length) {
+    const pts = [...chord.pcs].sort((a, b) => fifthsPos(a) - fifthsPos(b)).map(pc => cpos(pc, R - 30).join(",")).join(" ");
+    s += `<polygon points="${pts}" fill="${ramp(chord.tension)}" fill-opacity=".22" stroke="${ramp(chord.tension)}" stroke-width="1.5"/>`;
+    s += `<text x="${C0}" y="${C0 + 5}" font-size="15" font-weight="700" text-anchor="middle" fill="#f8fafc">${esc(chord.label)}</text>`;
+  }
+  const radius = { pulse1: R, pulse2: R - 18, triangle: R - 32 };
+  const seen = new Set();
+  for (const n of sounding) {
+    if (n.midi == null || !(n.lane in radius)) continue;
+    const pcs = n.arp ? [...new Set(n.arp.map(o => (n.midi + o) % 12))] : [n.midi % 12];
+    for (const pc of pcs) {
+      const key = `${n.lane}${pc}`; if (seen.has(key)) continue; seen.add(key);
+      const [x, y] = cpos(pc, radius[n.lane]);
+      s += `<circle cx="${x}" cy="${y}" r="${n.lane === "pulse1" ? 0 : 4.5}" fill="${LANE_COLOR[n.lane]}"/>`;
+    }
+  }
+  if (mel) {
+    const notes = S.A.a.notes, i = notes.indexOf(mel);
+    const prev = notes.slice(0, i).reverse().find(n => n.lane === "pulse1" && n.midi != null);
+    const [x, y] = cpos(mel.midi % 12, R);
+    if (prev && prev.midi % 12 !== mel.midi % 12) {
+      const [px, py] = cpos(prev.midi % 12, R);
+      s += `<line x1="${px}" y1="${py}" x2="${x}" y2="${y}" stroke="${ramp((mel.fifths_jump ?? 0) / 6)}" stroke-width="3" stroke-opacity=".8" stroke-linecap="round"/>`;
+      s += `<circle cx="${px}" cy="${py}" r="5" fill="none" stroke="#f472b6" stroke-opacity=".6"/>`;
+    }
+    s += `<circle cx="${x}" cy="${y}" r="9" fill="${noteColor(mel)}" stroke="#fff" stroke-width="2"/>`;
+  }
+  g.innerHTML = s;
+}
+
+// ------------------------------------------------------------------ sidebar
+function renderFindings() {
+  const a = S.A.a;
+  const w = a.findings.filter(f => f.severity === "warn").length, i = a.findings.length - w;
+  $("#nwarn").textContent = `warnings (${w})`; $("#ninfo").textContent = `notes (${i})`;
+  const list = a.findings.filter(f => S.ff[f.severity]);
+  $("#findings").innerHTML = list.length ? list.map(f => `
+    <button data-act="finding" data-id="${esc(f.id)}" class="finding block w-full text-left rounded border ${f.section === S.sec ? "border-slate-700" : "border-slate-800/60 opacity-70"} bg-slate-950/50 hover:bg-slate-800/60 px-2 py-1.5" aria-current="${f.id === S.activeFinding}">
+      <div class="flex gap-1.5"><span class="${f.severity === "warn" ? "text-amber-400" : "text-slate-500"}">${f.severity === "warn" ? "▲" : "●"}</span><span class="font-medium text-slate-100 text-xs">${esc(f.title)}</span></div>
+      <div class="text-[11px] text-slate-400 mt-0.5 leading-snug">${esc(f.detail)}</div>
+      <div class="text-[11px] text-emerald-300/90 mt-0.5 leading-snug">→ ${esc(f.lever)}</div>
+    </button>`).join("") : `<div class="text-xs text-slate-500">Nothing to say at this filter.</div>`;
+}
+
+function renderMatrix() {
+  const sec = S.A.a.sections[S.sec], lay = sec.layouts[S.per], N = lay.rows.length;
+  const box = $("#matrix"), size = clamp(Math.floor(300 / (N + 1)), 12, 34), W = size * (N + 1) + 4;
+  let s = "";
+  for (let i = 0; i < N; i++) {
+    s += `<text x="${size * (i + 1) + size / 2}" y="${size * 0.7}" font-size="9" text-anchor="middle" fill="#94a3b8">${i + 1}</text>`;
+    s += `<text x="${size / 2}" y="${size * (i + 1) + size * 0.65}" font-size="9" text-anchor="middle" fill="#94a3b8">${i + 1}</text>`;
+    for (let j = 0; j < N; j++) {
+      const c = lay.matrix[i][j], x = size * (j + 1), y = size * (i + 1);
+      if (i === j) { s += `<rect x="${x}" y="${y}" width="${size - 1}" height="${size - 1}" fill="#1e293b"/>`; continue; }
+      if (!c) { s += `<rect x="${x}" y="${y}" width="${size - 1}" height="${size - 1}" fill="#0b1020" stroke="#1e293b"/>`; continue; }
+      const v = i > j ? c.rhythm : c.contour;
+      const col = v == null ? "#0b1020" : `rgba(245,158,11,${(0.06 + 0.94 * Math.pow(Math.min(1, v), 1.3)).toFixed(3)})`;
+      const what = i > j ? `rhythm ${Math.round(c.rhythm * 100)}% different` : `tune ${c.contour == null ? "–" : Math.round(c.contour * 100) + "%"} different`;
+      s += `<rect data-act="pair" data-i="${i}" data-j="${j}" x="${x}" y="${y}" width="${size - 1}" height="${size - 1}" fill="${col}" class="cursor-pointer"><title>line ${i + 1} vs line ${j + 1}: ${what} (click to hear both)</title></rect>`;
+    }
+  }
+  box.setAttribute("viewBox", `0 0 ${W} ${W}`);
+  box.innerHTML = s;
+}
+
+function noteText(n) {
+  const a = S.A.a, sec = a.sections[n.section];
+  const src = (a.source_lines[n.line - 1] || "").trim();
+  if (n.midi == null) return `<b>${drumOf(n.pitch)}</b> (noise ${esc(n.pitch)}) · vol ${n.vol}${n.fade ? " fade" : ""}<br>${esc(sec.name)} ${where(sec, n.start)} · ${n.len} slots<br><span class="text-slate-500">line ${n.line}: ${esc(src)}</span>`;
+  const w = n.worst_rub;
+  return `<b style="color:${LANE_COLOR[n.lane]}">${esc(n.name)}</b> · ${LANE_NAME[n.lane]} (${n.lane})${n.arp ? ` · arp ${n.arp.join(",")}` : ""}<br>
+    ${esc(sec.name)} ${where(sec, n.start)} · ${n.len} slot${n.len > 1 ? "s" : ""} · vol ${n.vol ?? "–"}${n.duty ? ` · duty ${n.duty}` : ""}<br>
+    over <b>${esc(n.chord || "–")}</b>: ${esc(n.role || "–")}<br>
+    tension <b>${fmt(n.tension)}</b> = .4×harmonic ${fmt(n.harm)} + .4×depth ${fmt(n.depth)} + .2×rub ${fmt(n.rub)}<br>
+    ${w ? `<span class="text-rose-300">rubs a ${esc(w.interval)} against ${esc(w.lane)}'s ${esc(w.pitch)} for ${w.slots} slot${w.slots > 1 ? "s" : ""}</span><br>` : ""}
+    ${n.interval != null ? `from the last melody note: ${n.interval > 0 ? "+" : ""}${n.interval} semitones, ${n.fifths_jump} step${n.fifths_jump === 1 ? "" : "s"} round the circle of fifths<br>` : ""}
+    ${n.surprise != null ? `surprise ${n.surprise.toFixed(1)} bits<br>` : ""}
+    <span class="text-slate-500">line ${n.line}: ${esc(src)}</span>`;
+}
+function renderSel() {
+  const box = $("#selbox");
+  if (S.sel == null) { box.classList.add("hidden"); return; }
+  const n = S.A.a.notes[S.sel], sec = S.A.a.sections[n.section];
+  const ref = `${S.A.id} ${sec.name} ${where(sec, n.start)} ${n.lane} ${n.name || n.pitch} (score line ${n.line})`;
+  box.classList.remove("hidden");
+  box.innerHTML = `<div class="flex justify-between items-center mb-1"><b class="text-yellow-300">selected</b>
+    <span class="flex gap-1"><button data-act="copy" class="rounded bg-slate-800 hover:bg-slate-700 px-2 py-0.5" title="copy a reference to this note">copy ref</button><button data-act="unsel" class="rounded bg-slate-800 hover:bg-slate-700 px-2 py-0.5">×</button></span></div>
+    <div class="mono leading-snug">${noteText(n)}</div><div class="hidden" id="selref">${esc(ref)}</div>`;
+}
+
+// ------------------------------------------------------------------ lanes, header
+function renderLanes() {
+  const a = S.A.a, mutable = a.stems_add_up;
+  $("#lanes").innerHTML = a.lanes.map((l, i) => `
+    <span class="flex items-center gap-0.5 rounded border border-slate-800 px-1.5 py-0.5 ${S.mute[l] || (S.solo && S.solo !== l) ? "opacity-40" : ""}">
+      <span class="w-2 h-2 rounded-full" style="background:${LANE_COLOR[l]}"></span><span class="ml-1">${LANE_NAME[l]}</span>
+      <button data-act="mute" data-lane="${l}" ${mutable ? "" : "disabled"} class="ml-1 rounded px-1 ${S.mute[l] ? "bg-rose-800" : "bg-slate-800"}" title="mute (key ${i + 1})">M</button>
+      <button data-act="solo" data-lane="${l}" ${mutable ? "" : "disabled"} class="rounded px-1 ${S.solo === l ? "bg-emerald-700" : "bg-slate-800"}" title="solo">S</button>
+    </span>`).join("") + (mutable ? "" : `<span class="text-rose-300">the lanes don't add up to the mix here, so mute is off</span>`);
+}
+function renderSelects() {
+  const ids = Object.keys(S.index.songs).sort();
+  const opt = (id, sel) => `<option value="${esc(id)}" ${id === sel ? "selected" : ""}>${esc(id)}${S.index.songs[id].error ? " (broken)" : ""}</option>`;
+  $("#song").innerHTML = ids.map(id => opt(id, S.A && S.A.id)).join("");
+  $("#vs").innerHTML = `<option value="">nothing</option>` + ids.filter(id => !S.A || id !== S.A.id).map(id => opt(id, S.B && S.B.id)).join("");
+  const ab = $("#ab");
+  ab.classList.toggle("hidden", !S.B);
+  if (S.B) ab.textContent = comparable() ? `hearing A ⇄ B (${S.B.id})` : `B doesn't line up with A`;
+}
+function seg() {
+  $$("#colormode button").forEach(b => b.setAttribute("aria-pressed", b.dataset.color === S.color));
+  $$("#permode button").forEach(b => b.setAttribute("aria-pressed", b.dataset.per === S.per));
+  $("#loop").checked = S.loop; $("#follow").checked = S.follow;
+}
+function renderAll() {
+  const a = S.A.a;
+  $("#title").textContent = a.title;
+  $("#subtitle").textContent = `${a.file} · key ${a.key.name} (runner-up ${a.key.runner_up}) · tempo ${a.tempo} · first ${a.cut_seconds.toFixed(1)}s of ${a.full_seconds.toFixed(1)}s (${a.sections.length} of ${a.sections_total} sections)`;
+  document.title = `${a.title} · the ear`;
+  S.sec = clamp(S.sec, 0, a.sections.length - 1);
+  renderSelects(); seg(); renderLanes(); renderOverview(); renderTabs(); renderSection(); renderCircleBase(); renderFindings(); renderMatrix(); renderSel();
+  const sec = a.sections[S.sec]; showNow(sec, S.range && S.range.sec === S.sec ? sec.bars[S.range.from - 1].start : 0);
+}
+
+// ------------------------------------------------------------------ hash state
+function writeHash() {
+  if (!S.A) return;
+  const p = new URLSearchParams({ song: S.A.id, sec: S.A.a.sections[S.sec].name, per: S.per, color: S.color });
+  if (S.B) p.set("vs", S.B.id);
+  if (S.range && S.range.sec != null) p.set("bars", `${S.range.from}-${S.range.to}`);
+  history.replaceState(null, "", "#" + p.toString());
+}
+function readHash() { return Object.fromEntries(new URLSearchParams(location.hash.slice(1))); }
+
+// ------------------------------------------------------------------ events
+document.addEventListener("click", async e => {
+  const t = e.target.closest("[data-act],[data-note],[data-color],[data-per]");
+  if (!t) return;
+  if (t.dataset.color) { S.color = t.dataset.color; seg(); renderSection(); renderCircleBase(); writeHash(); return; }
+  if (t.dataset.per) { S.per = t.dataset.per; seg(); renderSection(); renderMatrix(); writeHash(); return; }
+  if (t.dataset.note != null && !t.dataset.act) {
+    S.sel = +t.dataset.note; markSel(); renderSel();
+    const n = S.A.a.notes[S.sel]; showNow(S.A.a.sections[n.section], n.start, n);
+    return;
+  }
+  const act = t.dataset.act;
+  if (act === "sec") { S.sec = +t.dataset.sec; renderTabs(); renderSection(); renderOverview(); renderMatrix(); renderFindings(); writeHash(); window.scrollTo({ top: 0, behavior: "smooth" }); }
+  else if (act === "bar") {
+    const n = +t.dataset.bar;
+    if (e.shiftKey && S.range && S.range.sec === S.sec) setRange(barsRange(S.sec, S.anchor ?? S.range.from, n), true);
+    else { S.anchor = n; setRange(barsRange(S.sec, n, n), true); }
+  }
+  else if (act === "tbar") {
+    const si = +t.dataset.sec, n = +t.dataset.bar;
+    if (si !== S.sec) { S.sec = si; renderTabs(); renderSection(); renderMatrix(); renderFindings(); }
+    S.anchor = n; setRange(barsRange(si, n, n), true); scrollToBar(n);
+  }
+  else if (act === "row") {
+    const row = S.A.a.sections[S.sec].layouts[S.per].rows[+t.dataset.row];
+    setRange(barsRange(S.sec, row.bars[0], row.bars[row.bars.length - 1]), true);
+  }
+  else if (act === "pair") {
+    const lay = S.A.a.sections[S.sec].layouts[S.per], i = +t.dataset.i, j = +t.dataset.j;
+    const [ra, rb] = [lay.rows[Math.min(i, j)], lay.rows[Math.max(i, j)]];
+    if (rb.bars[0] === ra.bars[ra.bars.length - 1] + 1) setRange(barsRange(S.sec, ra.bars[0], rb.bars[rb.bars.length - 1]), true);
+    else setRange(barsRange(S.sec, ra.bars[0], ra.bars[ra.bars.length - 1]), true);
+    $(`#row${Math.min(i, j)}`).scrollIntoView({ block: "start", behavior: "smooth" });
+  }
+  else if (act === "finding") {
+    const f = S.A.a.findings.find(x => x.id === t.dataset.id); if (!f) return;
+    S.activeFinding = f.id;
+    if (f.section !== S.sec) { S.sec = f.section; renderTabs(); renderSection(); renderMatrix(); }
+    renderFindings();
+    setRange(barsRange(f.section, f.bars[0], f.bars[f.bars.length - 1]), true);
+    scrollToBar(f.bars[0]);
+  }
+  else if (act === "mute") { const l = t.dataset.lane; S.mute[l] = !S.mute[l]; renderLanes(); applyLaneGains(); }
+  else if (act === "solo") { const l = t.dataset.lane; S.solo = S.solo === l ? null : l; renderLanes(); applyLaneGains(); }
+  else if (act === "copy") { const ref = $("#selref").textContent; try { await navigator.clipboard.writeText(ref); t.textContent = "copied"; } catch (err) { prompt("copy this", ref); } }
+  else if (act === "unsel") { S.sel = null; markSel(); renderSel(); }
+});
+
+document.addEventListener("mousemove", e => {
+  const t = e.target.closest && e.target.closest("[data-note]");
+  const tip = $("#tip");
+  if (!t || !S.A) { tip.classList.add("hidden"); return; }
+  tip.innerHTML = noteText(S.A.a.notes[+t.dataset.note]);
+  tip.classList.remove("hidden");
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  tip.style.left = Math.min(window.innerWidth - w - 8, e.clientX + 14) + "px";
+  tip.style.top = (e.clientY + h + 20 > window.innerHeight ? e.clientY - h - 10 : e.clientY + 16) + "px";
+});
+
+$("#play").onclick = () => (P.playing ? stopPlayback() : playRange());
+$("#playsec").onclick = () => setRange(sectionRange(S.sec), true);
+$("#playall").onclick = () => { const a = S.A.a; setRange({ sec: null, from: 0, to: 0, t0: 0, t1: a.cut_seconds, label: `the whole ${a.cut_seconds.toFixed(0)}s` }, true); };
+$("#loop").onchange = e => { S.loop = e.target.checked; if (P.playing) playRange(); };
+$("#follow").onchange = e => { S.follow = e.target.checked; };
+$("#zin").onclick = () => { S.zoom = clamp((S.zoom || S.SW) + 3, 4, 60); renderSection(); };
+$("#zout").onclick = () => { S.zoom = clamp((S.zoom || S.SW) - 3, 4, 60); renderSection(); };
+$("#zfit").onclick = () => { S.zoom = 0; renderSection(); };
+$$("[data-ff]").forEach(cb => cb.onchange = () => { S.ff[cb.dataset.ff] = cb.checked; renderFindings(); renderOverview(); });
+$("#song").onchange = async e => { await switchSong(e.target.value, S.B && S.B.id !== e.target.value ? S.B.id : null); };
+$("#vs").onchange = async e => {
+  try { S.B = e.target.value ? await loadSong(e.target.value) : null; banner(""); } catch (err) { banner(String(err.message || err)); S.B = null; }
+  renderSelects(); writeHash(); if (P.playing) playRange();
+};
+$("#ab").onclick = () => swapAB();
+function swapAB() {
+  if (!S.B || !comparable()) return;
+  [S.A, S.B] = [S.B, S.A];
+  if (P.playing) for (const [id, g] of Object.entries(P.songGain)) g.gain.setTargetAtTime(id === S.A.id ? 1 : 0, ctx.currentTime, 0.008);
+  const keepSel = S.sel; S.sel = keepSel;
+  renderAll(); writeHash();
+  flash(`now hearing ${S.A.id}`);
+}
+function flash(t) { status(t); clearTimeout(flash.h); flash.h = setTimeout(() => status(""), 2500); }
+
+document.addEventListener("keydown", e => {
+  if (["INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName) || e.metaKey || e.ctrlKey) return;
+  const k = e.key;
+  if (e.code === "Space") { e.preventDefault(); P.playing ? stopPlayback() : playRange(); }
+  else if (k === "Escape") stopPlayback();
+  else if (k === "ArrowRight") { e.preventDefault(); shiftRange(1); }
+  else if (k === "ArrowLeft") { e.preventDefault(); shiftRange(-1); }
+  else if (k === "l" || k === "L") { S.loop = !S.loop; seg(); if (P.playing) playRange(); }
+  else if (k === "b" || k === "B") swapAB();
+  else if (k === "f" || k === "F") { S.follow = !S.follow; seg(); }
+  else if ("1234".includes(k) && k.length === 1) { const l = S.A.a.lanes[+k - 1]; if (l) { S.mute[l] = !S.mute[l]; renderLanes(); applyLaneGains(); } }
+  else if (k === "+" || k === "=") $("#zin").click();
+  else if (k === "-") $("#zout").click();
+});
+let resizeT; window.addEventListener("resize", () => { clearTimeout(resizeT); resizeT = setTimeout(() => { if (S.A) { renderOverview(); renderSection(); } }, 150); });
+
+// ------------------------------------------------------------------ boot and live reload
+async function switchSong(id, vsId, keep) {
+  try {
+    const A = await loadSong(id);
+    const B = vsId ? await loadSong(vsId).catch(() => null) : null;
+    const prevSecName = S.A ? S.A.a.sections[S.sec].name : null;
+    S.A = A; S.B = B; banner("");
+    const si = A.a.sections.findIndex(s => s.name === (keep && keep.sec || prevSecName));
+    S.sec = si >= 0 ? si : 0;
+    if (!keep) { S.sel = null; S.range = null; }
+    renderAll(); writeHash();
+    if (S.range && P.playing) startPlayback(S.range.t0, S.range.t1);
+  } catch (err) { banner(String(err.message || err)); }
+}
+
+async function boot() {
+  try { S.index = await getIndex(); } catch (err) { banner("No data yet: run python3 ear/serve.py (it builds everything in songs/)."); return; }
+  const h = readHash();
+  S.per = ["1", "2", "4"].includes(h.per) ? h.per : "2";
+  if (["tension", "role", "fifths"].includes(h.color)) S.color = h.color;
+  const ids = Object.keys(S.index.songs).filter(id => !S.index.songs[id].error);
+  const id = h.song && S.index.songs[h.song] ? h.song : (ids.includes("but-we-endure") ? "but-we-endure" : ids[0]);
+  if (!id) { banner("Nothing has built yet. Is ear/serve.py running?"); renderSelectsBare(); return; }
+  await switchSong(id, h.vs || null, { sec: h.sec });
+  if (h.bars) {
+    const [f, t] = h.bars.split("-").map(Number);
+    if (f && t && S.A.a.sections[S.sec].bars[t - 1]) setRange(barsRange(S.sec, f, t));
+  }
+  if (h.selftest) { const t = document.createElement("script"); t.src = "selftest.js"; document.body.appendChild(t); return; }
+  setInterval(poll, 1500);
+}
+function renderSelectsBare() { $("#song").innerHTML = Object.keys(S.index.songs).map(id => `<option>${esc(id)}</option>`).join(""); }
+
+async function poll() {
+  let idx;
+  try { idx = await getIndex(); } catch (err) { return; }
+  if (!S.A || idx.version === S.index.version) return;
+  S.index = idx;
+  const eA = idx.songs[S.A.id];
+  if (eA && eA.error) { banner(`${S.A.id} didn't build:\n${eA.error}`); renderSelects(); return; }
+  const stale = id => idx.songs[id] && !idx.songs[id].error && Math.abs(idx.songs[id].built_at - cache_built(id)) > 1e-6;
+  if (stale(S.A.id) || (S.B && stale(S.B.id))) {
+    const range = S.range, sel = S.sel, wasPlaying = P.playing;
+    await switchSong(S.A.id, S.B && S.B.id, { sec: S.A.a.sections[S.sec].name });
+    S.sel = sel != null && sel < S.A.a.notes.length ? sel : null; renderSel(); markSel();
+    if (range) { S.range = range.sec != null && S.A.a.sections[range.sec] && S.A.a.sections[range.sec].bars[range.to - 1] ? barsRange(range.sec, range.from, range.to) : range; setRange(S.range, wasPlaying); }
+    flash(`rebuilt ${new Date().toLocaleTimeString()}`);
+  } else { banner(""); renderSelects(); }
+}
+function cache_built(id) { const s = (id === S.A.id ? S.A : S.B); return s ? s.a.built_at : 0; }
+
+boot();
+</script>
+</body>
+</html>
