@@ -1,4 +1,4 @@
-use piropipo::profile::{self, Card, Voice, named};
+use piropipo::profile::{self, Card, named};
 use piropipo::render;
 use piropipo::score::{Bend, COMMON_TIME, Lane, Note, Pattern, Position, Song};
 use serde_json::{Value, json};
@@ -83,12 +83,13 @@ struct Held { from: u64, to: u64, tones: Vec<Tone> }
 struct Overlap { one: Tone, other: Tone, from: u64, to: u64 }
 
 fn voiced<'l>(tempo: u32, pattern: &Pattern, card: &Card, lane: &'l Lane) -> Option<(usize, &'l str, Vec<Held>)> {
-    let (seat, part) = card.parts.iter().enumerate().find(|(_, p)| p.name == lane.name)?;
-    if part.voice == Voice::Noise { return None; }
-    let level = part.setup(&lane.params).ok()?.volume;
+    let (place, part) = card.parts.iter().enumerate().find(|(_, p)| p.name == lane.name)?;
+    let seat = part.seat(&lane.params).ok()?;
+    if !seat.voice.pitched() { return None; }
+    let level = seat.setup.volume;
     let mut notes: Vec<Held> = lane.notes.iter().filter(|n| n.ornaments.vol.unwrap_or(level) > 0).filter_map(|n| held(tempo, pattern, n)).collect();
     notes.sort_unstable_by_key(|h| h.from);
-    Some((seat, lane.name.as_str(), notes))
+    Some((place, lane.name.as_str(), notes))
 }
 
 fn held(tempo: u32, pattern: &Pattern, note: &Note) -> Option<Held> {

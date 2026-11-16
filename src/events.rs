@@ -1,29 +1,37 @@
 use crate::listen::{Take, round};
-use piropipo::profile::{self, DUTIES, Setup, Voice, named};
-use piropipo::render::{self, SAMPLE_RATE};
+use piropipo::profile::{self, DUTIES, Seat, Setup, Voice, named};
+use piropipo::render;
 use piropipo::score::{Bend, Ornaments, Position};
 use serde_json::{Value, json};
 use std::ops::Range;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Strike { pub pattern: String, pub play: usize, pub lane: String, pub voice: Voice, pub pitch: Option<u8>, pub at: Position, pub end: Position, pub samples: Range<u64>, pub volume: u8, pub duty: Option<u8>, pub line: usize, pub ornaments: Ornaments, pub pace: Option<(u64, f64)> }
+pub struct Strike { pub pattern: String, pub play: usize, pub lane: String, pub voice: Voice, pub pitch: Option<u8>, pub at: Position, pub end: Position, pub samples: Range<u64>, pub rate: u32, pub volume: u8, pub duty: Option<u8>, pub line: usize, pub ornaments: Ornaments, pub pace: Option<(u64, f64)>, pub seat: Seat }
 
 impl Strike {
     fn json(&self, pitch: u8) -> Value {
-        let noise = self.voice == Voice::Noise;
-        // the noise hears only the letter: its octave never reaches the chip
-        let heard = if noise { named(pitch).trim_end_matches(|c: char| c.is_ascii_digit() || c == '-').to_owned() } else { named(pitch) };
-        json!({
-            "pattern": self.pattern, "play": self.play, "lane": self.lane, "pitch": heard, "midi": (!noise).then_some(pitch), "at": self.at.to_string(), "end": self.end.to_string(),
-            "start_seconds": seconds(self.samples.start), "end_seconds": seconds(self.samples.end), "start_sample": self.samples.start, "end_sample": self.samples.end,
+        // the nes noise and the snes kit hear only the letter: the octave never reaches the chip
+        let lettered = matches!(self.voice, Voice::Noise | Voice::Kit);
+        let heard = if lettered { named(pitch).trim_end_matches(|c: char| c.is_ascii_digit() || c == '-').to_owned() } else { named(pitch) };
+        let mut told = json!({
+            "pattern": self.pattern, "play": self.play, "lane": self.lane, "pitch": heard, "midi": self.voice.pitched().then_some(pitch), "at": self.at.to_string(), "end": self.end.to_string(),
+            "start_seconds": seconds(self.samples.start, self.rate), "end_seconds": seconds(self.samples.end, self.rate), "start_sample": self.samples.start, "end_sample": self.samples.end,
             "volume": self.volume, "duty": self.duty.and_then(width), "line": self.line, "effects": self.effects(pitch),
-        })
+        });
+        if let (Some(patch), Some(inst)) = (self.seat.setup.patch, self.seat.inst) {
+            told["inst"] = json!(inst.name);
+            if let Some(drum) = inst.drum(pitch).filter(|_| self.voice == Voice::Kit) { told["drum"] = json!(drum.name); }
+            if self.voice == Voice::Hiss { told["noise_clock_hz"] = json!(round(piropipo::dsp::clock_hz(profile::clock(pitch)), 3)); }
+            told["pan"] = json!(patch.pan);
+            told["echo"] = json!(patch.echo);
+        }
+        told
     }
 
     fn hush(&self) -> Value {
         json!({
             "pattern": self.pattern, "play": self.play, "lane": self.lane, "at": self.at.to_string(), "end": self.end.to_string(),
-            "start_seconds": seconds(self.samples.start), "end_seconds": seconds(self.samples.end), "start_sample": self.samples.start, "end_sample": self.samples.end, "line": self.line,
+            "start_seconds": seconds(self.samples.start, self.rate), "end_seconds": seconds(self.samples.end, self.rate), "start_sample": self.samples.start, "end_sample": self.samples.end, "line": self.line,
         })
     }
 
@@ -32,7 +40,7 @@ impl Strike {
         let (steps, rate) = (self.pace.map(|(steps, _)| steps), self.pace.map(|(_, rate)| round(rate, 2)));
         let bend = bend.as_ref().map(|b| (b.word(), match b {
             Bend::Vibrato(vib) => {
-                let (up, down) = profile::swing(pitch, profile::ticks(pitch, vib.cents));
+                let (up, down) = if self.voice == Voice::Sample { (vib.cents, vib.cents) } else { profile::swing(pitch, profile::ticks(pitch, vib.cents)) };
                 json!({ "rate_hz": round(vib.hertz(), 3), "delay_ms": round(vib.delay_ms(), 1), "up_cents": round(up, 2), "down_cents": round(down, 2) })
             }
             Bend::Arpeggio(offsets) => json!({ "offsets": offsets, "steps": steps, "steps_per_second": rate }),
@@ -44,27 +52,28 @@ impl Strike {
 }
 
 pub fn strikes(take: &Take) -> Vec<Strike> {
-    let Take { song, plays, .. } = take;
+    let Take { song, plays, rate, .. } = take;
     let Ok(card) = profile::card(song.profile.as_deref()) else { return Vec::new() };
     let mut heard = Vec::new();
     for (i, (cue, span)) in song.setlist.iter().zip(plays).enumerate() {
         let pattern = song.pattern(&cue.pattern).expect("the copyist refuses a play line that names no pattern");
         let moved = render::transposed(song, pattern, cue).expect("a take only exists once every play has landed on the chip");
         let play = song.setlist.iter().take(i + 1).filter(|c| c.pattern == cue.pattern).count();
-        let sample = |slots: u64| span.start as u64 + render::sample_in(song.tempo, &moved, slots).expect("a take only exists once every played pattern has its staff");
+        let sample = |slots: u64| span.start as u64 + render::sample_in(*rate, song.tempo, &moved, slots).expect("a take only exists once every played pattern has its staff");
         let mut batch: Vec<(usize, Strike)> = Vec::new();
         for lane in &moved.lanes {
-            let Some((seat, part)) = card.parts.iter().enumerate().find(|(_, p)| p.name == lane.name) else { continue };
-            let Ok(Setup { volume: home, duty: cast }) = part.setup(&lane.params) else { continue };
+            let Some((place, part)) = card.parts.iter().enumerate().find(|(_, p)| p.name == lane.name) else { continue };
+            let Ok(seat) = part.seat(&lane.params) else { continue };
+            let Setup { volume: home, duty: cast, .. } = seat.setup;
             for note in &lane.notes {
                 let from = note.at.tick(moved.grid);
                 let pace = matches!(note.ornaments.bend, Some(Bend::Arpeggio(_) | Bend::Slide(_))).then(|| render::arp_rate(song.tempo, &moved, note.len)).flatten();
                 let duty = note.pitch.and(note.ornaments.duty.or(cast));
-                let struck = Strike { pattern: moved.name.clone(), play, lane: lane.name.clone(), voice: part.voice, pitch: note.pitch, at: note.at, end: note.rings_through(moved.grid), samples: sample(from)..sample(from + u64::from(note.len)), volume: note.ornaments.vol.unwrap_or(home), duty, line: note.line, ornaments: note.ornaments.clone(), pace };
-                batch.push((seat, struck));
+                let struck = Strike { pattern: moved.name.clone(), play, lane: lane.name.clone(), voice: seat.voice, pitch: note.pitch, at: note.at, end: note.rings_through(moved.grid), samples: sample(from)..sample(from + u64::from(note.len)), rate: *rate, volume: note.ornaments.vol.unwrap_or(home), duty, line: note.line, ornaments: note.ornaments.clone(), pace, seat };
+                batch.push((place, struck));
             }
         }
-        batch.sort_by_key(|(seat, s)| (s.samples.start, *seat));
+        batch.sort_by_key(|(place, s)| (s.samples.start, *place));
         heard.extend(batch.into_iter().map(|(_, s)| s));
     }
     heard
@@ -82,7 +91,7 @@ pub fn tell(strikes: &[Strike]) -> String {
 
 fn width(register: u8) -> Option<f64> { DUTIES.get(usize::from(register)).and_then(|names| names.first()).and_then(|name| name.parse().ok()) }
 
-fn seconds(sample: u64) -> f64 { round(sample as f64 / f64::from(SAMPLE_RATE), 6) }
+fn seconds(sample: u64, rate: u32) -> f64 { round(sample as f64 / f64::from(rate), 6) }
 
 #[cfg(test)]
 mod tests {
@@ -221,8 +230,8 @@ mod tests {
         let (_, strikes) = struck("song \"s\" tempo 120\npattern endless bars 4000000000 beats 32 grid 255\nlane pulse1\n  1.1: C4 x9 fade\n  4000000000.1: A4 x60 arp 0,4,7\npattern ding bars 1 grid 4\nlane pulse1\n  1: C5 x2\nplay\n  ding\n");
         assert_eq!(strikes.iter().map(|s| (s.pattern.as_str(), s.at)).collect::<Vec<_>>(), [("ding", pos(1, 1))]);
         let vast = Song::parse("song \"s\" tempo 120\npattern endless bars 4000000000 beats 32 grid 255\n").unwrap();
-        assert_eq!(render::sample_in(120, &vast.patterns[0], 4_000_000_000 * 255), Some(4_000_000_000 * 705_600), "a 32-beat bar at 120 is 16 s; the clock is arithmetic, never a walk across the bars");
-        assert_eq!(render::sample_in(120, &vast.patterns[0], u64::MAX), None);
+        assert_eq!(render::sample_in(44_100, 120, &vast.patterns[0], 4_000_000_000 * 255), Some(4_000_000_000 * 705_600), "a 32-beat bar at 120 is 16 s; the clock is arithmetic, never a walk across the bars");
+        assert_eq!(render::sample_in(44_100, 120, &vast.patterns[0], u64::MAX), None);
     }
 
     #[test]

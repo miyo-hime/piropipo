@@ -1,8 +1,11 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-pub fn pressed(samples: &[i16], rate: u32) -> Result<Vec<u8>, hound::Error> {
-    let spec = hound::WavSpec { channels: 1, sample_rate: rate, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+pub fn pressed(samples: &[i16], rate: u32) -> Result<Vec<u8>, hound::Error> { pressed_with(samples, 1, rate) }
+
+// `samples` interleaved, one per channel per frame
+pub fn pressed_with(samples: &[i16], channels: u16, rate: u32) -> Result<Vec<u8>, hound::Error> {
+    let spec = hound::WavSpec { channels, sample_rate: rate, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
     let mut disc = std::io::Cursor::new(Vec::new());
     let mut wav = hound::WavWriter::new(&mut disc, spec)?;
     for &s in samples { wav.write_sample(s)?; }

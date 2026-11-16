@@ -2,8 +2,8 @@ use crate::events::{self, Strike};
 use crate::harmony::{self, Rub};
 use crate::surface;
 use crate::vu::{self, Reading};
-use piropipo::profile::{self, Breach, Charge};
-use piropipo::render::{self, RenderError, SAMPLE_RATE, Stencils};
+use piropipo::profile::{self, Charge, Room, Spend};
+use piropipo::render::{self, RenderError, Stencils, Tail};
 use piropipo::score::{Bend, COMMON_TIME, Cue, Lane, Note, Pattern, Position, ScoreError, Song};
 use serde_json::{Value, json};
 use std::fmt;
@@ -43,7 +43,8 @@ impl From<ScoreError> for Remark {
 pub struct Ring { pub at: Position, pub end: Position, pub rest: bool }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Swing { pub shift: i8, pub ticks: u8, pub up: f64, pub down: f64 }
+// `ticks` is the nes period register's count; the snes pitch register is fine enough that it swings what was asked, and has none
+pub struct Swing { pub shift: i8, pub ticks: Option<u8>, pub up: f64, pub down: f64 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Flourish {
@@ -65,7 +66,7 @@ impl Flourish {
     fn tell(&self) -> String {
         match self {
             Flourish::Vibrato { at, hertz, delay_ms, swings } => {
-                let swings: Vec<String> = swings.iter().map(|s| format!("{}+{:.1}/-{:.1} cents ({} tick{})", if s.shift == 0 { String::new() } else { format!("played {:+}, ", s.shift) }, s.up, s.down, s.ticks, if s.ticks == 1 { "" } else { "s" })).collect();
+                let swings: Vec<String> = swings.iter().map(|s| format!("{}+{:.1}/-{:.1} cents{}", if s.shift == 0 { String::new() } else { format!("played {:+}, ", s.shift) }, s.up, s.down, s.ticks.map_or(String::new(), |t| format!(" ({t} tick{})", if t == 1 { "" } else { "s" })))).collect();
                 format!("{at} vib: {} Hz after {delay_ms:.0} ms, swings {}", round(*hertz, 3), swings.join("; "))
             }
             Flourish::Arpeggio { at, steps, rate } => format!("{at} arp: {steps} steps, {rate:.1} a second"),
@@ -92,8 +93,27 @@ impl Solo {
     }
 }
 
+// what only the snes card has: its sound ram, its echo, and the tail it leaves ringing past the end of the file
 #[derive(Debug, Clone, PartialEq)]
-pub struct Stats { pub seconds: f64, pub peak_dbfs: Option<f64>, pub saturated: usize, pub lanes: Vec<Solo>, pub gauges: Option<Reading> }
+pub struct Chip { pub spend: Spend, pub room: Option<Room>, pub tail: Tail, pub looped: bool }
+
+impl Chip {
+    fn json(&self) -> Value {
+        let items: Vec<Value> = self.spend.items.iter().map(|(name, bytes)| json!({ "name": name, "bytes": bytes })).collect();
+        let echo = self.room.map(|r| json!({ "delay_ms": r.ms(), "feedback_percent": r.feedback_percent(), "wet_percent": r.wet_percent() }));
+        json!({ "sound_ram": { "bytes": self.spend.total, "of": profile::ARAM, "items": items }, "echo": echo, "tail": { "ms": round(self.tail.ms, 1), "peak_dbfs": peak_dbfs(&[self.tail.peak]), "wrapped": self.looped } })
+    }
+
+    fn tell(&self) -> String {
+        let items: Vec<String> = self.spend.items.iter().map(|(name, bytes)| format!("{name} {:.1}", *bytes as f64 / 1024.0)).collect();
+        let echo = self.room.map_or("no echo".to_owned(), |r| format!("echo {} ms, feedback {}%, wet {}%", r.ms(), r.feedback_percent(), r.wet_percent()));
+        let tail = if self.tail.ms == 0.0 { "nothing rings past the end".to_owned() } else { format!("{:.0} ms ring past the end{}", self.tail.ms, if self.looped { ", wrapped onto the start" } else { "" }) };
+        format!("sound ram {:.1} of 64 kb ({}); {echo}; {tail}", self.spend.total as f64 / 1024.0, items.join(", "))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stats { pub seconds: f64, pub peak_dbfs: Option<f64>, pub saturated: usize, pub lanes: Vec<Solo>, pub gauges: Option<Reading>, pub chip: Option<Chip> }
 
 impl Stats {
     fn headline(&self) -> Value { json!({ "duration_seconds": self.seconds, "peak_dbfs": self.peak_dbfs, "saturated_samples": self.saturated }) }
@@ -101,28 +121,57 @@ impl Stats {
     fn json(&self) -> Value {
         let mut stats = self.headline();
         if let (Some(fields), Some(Value::Object(gauged))) = (stats.as_object_mut(), self.gauges.as_ref().map(Reading::json)) { fields.extend(gauged); }
+        if let Some(chip) = &self.chip { stats["chip"] = chip.json(); }
         stats["lanes"] = self.lanes.iter().map(Solo::json).collect();
         stats
     }
 }
 
-pub struct Take { pub samples: Vec<i16>, pub stats: Stats, pub warnings: Vec<Remark>, pub rubs: Vec<Rub>, pub song: Song, pub plays: Vec<Range<usize>>, pub strikes: Option<Vec<Strike>> }
+// `samples` is what the ears measure: the one channel, or on the snes the average of both. `stereo` is what the snes really wrote
+pub struct Take { pub samples: Vec<i16>, pub stereo: Option<Vec<[i16; 2]>>, pub rate: u32, pub stats: Stats, pub warnings: Vec<Remark>, pub rubs: Vec<Rub>, pub song: Song, pub plays: Vec<Range<usize>>, pub strikes: Option<Vec<Strike>> }
+
+impl Take {
+    // the louder channel at every sample: what peaks and the rails are judged on
+    pub fn peaks(&self) -> std::borrow::Cow<'_, [i16]> {
+        match &self.stereo {
+            Some(stereo) => stereo.iter().map(|[l, r]| if l.unsigned_abs() >= r.unsigned_abs() { *l } else { *r }).collect::<Vec<_>>().into(),
+            None => self.samples.as_slice().into(),
+        }
+    }
+}
 
 pub fn read(input: &str) -> Result<String, Vec<Remark>> {
     surface::read_source(input).map(|(text, _)| text).map_err(|e| vec![Remark::loose("unreadable-input", format!("can't read {input}: {e}"))])
 }
 
-pub fn take(text: &str) -> Result<Take, Vec<Remark>> {
+#[cfg(test)]
+pub fn take(text: &str) -> Result<Take, Vec<Remark>> { take_looped(text, false) }
+
+// `looped` plays the song through the chip twice and keeps the second pass, so whatever rings past the end (the snes echo, a
+// release) is already sounding at the start, the way it does when a game loops the song. the nes rings nothing past a note, so
+// there it changes nothing
+pub fn take_looped(text: &str, looped: bool) -> Result<Take, Vec<Remark>> {
     let song = Song::parse(text).map_err(|errors| errors.into_iter().map(Remark::from).collect::<Vec<_>>())?;
     if let Some(remark) = overlong(&song) { return Err(vec![remark]); }
-    let mut samples = Vec::new();
+    let (room, spend) = chip_needs(&song)?;
+    let rate = render::sample_rate(&song);
+    let mut stencils = Stencils::default();
+    let looped = looped && spend.is_some();
+    if looped {
+        for cue in &song.setlist {
+            let pattern = song.pattern(&cue.pattern).expect("the copyist refuses a play line that names no pattern");
+            render::transposed(&song, pattern, cue).and_then(|moved| render::press(&song, &moved, &mut stencils)).map_err(|e| vec![misheard(e, pattern)])?;
+        }
+    }
+    let (mut samples, mut stereo) = (Vec::new(), spend.as_ref().map(|_| Vec::new()));
     let mut plays = Vec::new();
     let mut lanes = Vec::new();
-    let mut stencils = Stencils::default();
     for (i, cue) in song.setlist.iter().enumerate() {
         let pattern = song.pattern(&cue.pattern).expect("the copyist refuses a play line that names no pattern");
         let from = samples.len();
-        samples.extend(render::transposed(&song, pattern, cue).and_then(|moved| render::pattern_with(&song, &moved, &mut stencils)).map_err(|e| vec![misheard(e, pattern)])?);
+        let pressed = render::transposed(&song, pattern, cue).and_then(|moved| render::press(&song, &moved, &mut stencils)).map_err(|e| vec![misheard(e, pattern)])?;
+        samples.extend(pressed.mono);
+        if let (Some(all), Some(more)) = (stereo.as_mut(), pressed.stereo) { all.extend(more); }
         plays.push(from..samples.len());
         if song.setlist.iter().take(i).any(|c| c.pattern == cue.pattern) { continue; }
         let mut shifts: Vec<i8> = song.setlist.iter().filter(|c| c.pattern == cue.pattern).map(|c| c.shift).collect();
@@ -132,16 +181,34 @@ pub fn take(text: &str) -> Result<Take, Vec<Remark>> {
     }
     let haunted = ghosts(&song);
     if !haunted.is_empty() { return Err(haunted); }
-    let stats = Stats { seconds: round(samples.len() as f64 / f64::from(SAMPLE_RATE), 3), peak_dbfs: peak_dbfs(&samples), saturated: saturated(&samples), lanes, gauges: None };
-    let mut warnings: Vec<Remark> = stats.lanes.iter().filter_map(hush).collect();
-    if stats.saturated > 0 { warnings.push(Remark::loose("saturation", format!("{} sample{} sit at full scale; the mix is hitting the rail and may be clipping", stats.saturated, if stats.saturated == 1 { "" } else { "s" }))); }
-    Ok(Take { samples, stats, warnings, rubs: harmony::rubs(&song), song, plays, strikes: None })
+    let chip = spend.zip(stencils.tail()).map(|(spend, tail)| Chip { spend, room, tail, looped });
+    let mut take = Take { samples, stereo, rate, stats: Stats { seconds: 0.0, peak_dbfs: None, saturated: 0, lanes, gauges: None, chip }, warnings: Vec::new(), rubs: harmony::rubs(&song), song, plays, strikes: None };
+    let peaks = take.peaks().into_owned();
+    take.stats.seconds = round(take.samples.len() as f64 / f64::from(rate), 3);
+    take.stats.peak_dbfs = peak_dbfs(&peaks);
+    take.stats.saturated = take.stereo.as_ref().map_or_else(|| saturated(&take.samples), |s| saturated(s.as_flattened()));
+    let mut warnings: Vec<Remark> = take.stats.lanes.iter().filter_map(hush).collect();
+    if take.stats.saturated > 0 { warnings.push(Remark::loose("saturation", format!("{} sample{} sit at full scale; the mix is hitting the rail and may be clipping", take.stats.saturated, if take.stats.saturated == 1 { "" } else { "s" }))); }
+    if let Some(chip) = take.stats.chip.as_ref().filter(|c| !c.looped && c.tail.ms > 0.0 && peak_dbfs(&[c.tail.peak]).is_some_and(|p| p > -40.0)) {
+        warnings.push(Remark::loose("tail-cut", format!("the file ends while the chip still rings (peak {:.1} dbfs, {:.0} ms more); write rests at the end to let it ring out, or render with --loop if the song loops", peak_dbfs(&[chip.tail.peak]).unwrap_or(-96.0), chip.tail.ms)));
+    }
+    take.warnings = warnings;
+    Ok(take)
+}
+
+// the song-wide things a card can refuse before a note renders: an echo it doesn't have, and a sound ram the song overfills
+fn chip_needs(song: &Song) -> Result<(Option<Room>, Option<Spend>), Vec<Remark>> {
+    let Ok(card) = profile::card(song.profile.as_deref()) else { return Ok((None, None)) };
+    let refused = |breach: profile::Breach| vec![Remark::loose(breach.code(), breach.to_string())];
+    let room = card.room(song).map_err(refused)?;
+    let spend = card.spend(song, room).map_err(refused)?;
+    Ok((room, spend))
 }
 
 pub fn answer(verb: &str, human: bool, detail: Detail, played: Result<(Option<PathBuf>, Take), Vec<Remark>>) -> Result<(), Box<dyn std::error::Error>> {
     match played {
         Ok((output, mut take)) => {
-            if detail == Detail::Everything { take.stats.gauges = Some(vu::read(&take.song, &take.samples, &take.plays)); }
+            if detail == Detail::Everything { let gauges = vu::read_with(&take.song, &take.samples, &take.peaks(), &take.plays, take.rate); take.stats.gauges = Some(gauges); }
             let stats = if detail == Detail::Headline { take.stats.headline() } else { take.stats.json() };
             let mut envelope = json!({ "ok": true, "verb": verb, "output": output.as_ref().map(|p| p.display().to_string()), "stats": stats, "warnings": take.warnings.iter().map(Remark::json).collect::<Vec<_>>() });
             if detail == Detail::Everything { envelope["harmony"] = harmony::json(&take.rubs); }
@@ -169,6 +236,7 @@ fn tell(output: Option<&Path>, stats: &Stats, detail: Detail, warnings: &[Remark
     let rail = match stats.saturated { 0 => "no samples at full scale".to_owned(), 1 => "1 sample at full scale".to_owned(), n => format!("{n} samples at full scale") };
     let mut lines = vec![format!("{head}: {:.3} seconds, {peak}, {rail}", stats.seconds)];
     if detail != Detail::Headline {
+        lines.extend(stats.chip.as_ref().map(Chip::tell));
         lines.extend(stats.gauges.as_ref().map(Reading::tell));
         lines.extend(stats.lanes.iter().map(Solo::tell));
     }
@@ -196,16 +264,7 @@ fn ghosts(song: &Song) -> Vec<Remark> {
 }
 
 fn indicted(pattern: &Pattern, charge: &Charge) -> Remark {
-    let (code, at) = match &charge.breach {
-        Breach::Profile(_) => ("unknown-profile", None),
-        Breach::Lane(_) => ("unknown-lane", None),
-        Breach::Param { .. } => ("unknown-param", None),
-        Breach::Volume(_) => ("no-volume-knob", None),
-        Breach::Duty(_) => ("bad-duty", None),
-        Breach::Loudness(_) => ("bad-volume", None),
-        Breach::Range { at, .. } => ("out-of-range", Some(*at)),
-        Breach::Ornament { at, flaw } => (flaw.code(), Some(*at)),
-    };
+    let (code, at) = (charge.breach.code(), charge.breach.at());
     let line = charge.note.map_or(charge.lane.line, |n| n.line);
     Remark { code, message: charge.breach.to_string(), pattern: Some(pattern.name.clone()), lane: Some(charge.lane.name.clone()), at, line: Some(line) }
 }
@@ -213,7 +272,8 @@ fn indicted(pattern: &Pattern, charge: &Charge) -> Remark {
 fn solo(song: &Song, pattern: &Pattern, cue: &Cue, lane: &Lane, shifts: &[i8]) -> Result<Solo, Vec<Remark>> {
     let mut notes: Vec<Ring> = lane.notes.iter().map(|n| Ring { at: n.at, end: n.rings_through(pattern.grid), rest: n.pitch.is_none() }).collect();
     notes.sort_by_key(|r| r.at);
-    let mut flourishes: Vec<Flourish> = lane.notes.iter().filter_map(|n| flourish(song.tempo, pattern, n, shifts)).collect();
+    let fine = profile::card(song.profile.as_deref()).ok().and_then(|c| c.part(&lane.name).ok()).is_some_and(|p| p.voice == profile::Voice::Sample);
+    let mut flourishes: Vec<Flourish> = lane.notes.iter().filter_map(|n| flourish(song.tempo, pattern, n, shifts, fine)).collect();
     flourishes.sort_by_key(|f| match f { Flourish::Vibrato { at, .. } | Flourish::Arpeggio { at, .. } => *at });
     let mut heard = Solo { pattern: pattern.name.clone(), lane: lane.name.clone(), line: lane.line, sounding: false, notes, flourishes };
     if heard.voiced() {
@@ -223,15 +283,16 @@ fn solo(song: &Song, pattern: &Pattern, cue: &Cue, lane: &Lane, shifts: &[i8]) -
     Ok(heard)
 }
 
-fn flourish(tempo: u32, pattern: &Pattern, note: &Note, shifts: &[i8]) -> Option<Flourish> {
+fn flourish(tempo: u32, pattern: &Pattern, note: &Note, shifts: &[i8], fine: bool) -> Option<Flourish> {
     let pitch = note.pitch?;
     match note.ornaments.bend.as_ref()? {
         Bend::Vibrato(vib) => {
             let swings = shifts.iter().filter_map(|&shift| {
                 let played = u8::try_from(i16::from(pitch) + i16::from(shift)).ok()?;
+                if fine { return Some(Swing { shift, ticks: None, up: vib.cents, down: vib.cents }); }
                 let ticks = profile::ticks(played, vib.cents);
                 let (up, down) = profile::swing(played, ticks);
-                Some(Swing { shift, ticks: u8::try_from(ticks as u64).ok()?, up, down })
+                Some(Swing { shift, ticks: Some(u8::try_from(ticks as u64).ok()?), up, down })
             }).collect();
             Some(Flourish::Vibrato { at: note.at, hertz: vib.hertz(), delay_ms: vib.delay_ms(), swings })
         }
@@ -262,7 +323,7 @@ fn misheard(e: RenderError, pattern: &Pattern) -> Remark {
         RenderError::Tempo(_) => ("tempo-out-of-reach", None, None),
         RenderError::Grid(_) | RenderError::Meter { .. } => ("grid-out-of-reach", None, None),
         RenderError::Beats(_) => ("beats-out-of-reach", None, None),
-        RenderError::Lane(lane) => ("unknown-lane", Some(lane.clone()), None),
+        RenderError::Lane { lane, .. } => ("unknown-lane", Some(lane.clone()), None),
         RenderError::Param { lane, .. } => ("unknown-param", Some(lane.clone()), None),
         RenderError::Volume { lane, .. } => ("no-volume-knob", Some(lane.clone()), None),
         RenderError::Duty { lane, .. } => ("bad-duty", Some(lane.clone()), None),
@@ -272,8 +333,9 @@ fn misheard(e: RenderError, pattern: &Pattern) -> Remark {
         RenderError::Ornament { lane, at, flaw, .. } => (flaw.code(), Some(lane.clone()), Some(*at)),
         RenderError::Misfit { lane, at } => ("misfit", Some(lane.clone()), Some(*at)),
         RenderError::Mml(_) => ("renderer-bug", None, None),
+        RenderError::Card { lane, breach } => (breach.code(), lane.clone(), breach.at()),
     };
-    let song_wide = matches!(e, RenderError::Profile(_) | RenderError::Tempo(_));
+    let song_wide = matches!(e, RenderError::Profile(_) | RenderError::Tempo(_) | RenderError::Card { lane: None, .. });
     let written = lane.as_ref().and_then(|name| pattern.lanes.iter().find(|l| l.name == *name));
     let note_line = written.and_then(|l| l.notes.iter().find(|n| Some(n.at) == at)).map(|n| n.line);
     let line = note_line.or(written.map(|l| l.line)).or((!song_wide).then_some(pattern.line));
@@ -502,7 +564,7 @@ mod tests {
         let effects = &heard.stats.lanes[0].flourishes;
         let [Flourish::Vibrato { at, hertz, delay_ms, swings }, Flourish::Arpeggio { steps: 30, rate, .. }] = &effects[..] else { panic!("{effects:?}") };
         assert_eq!((*at, round(*hertz, 3), round(*delay_ms, 1), *rate), (pos(1, 1), 6.667, 133.3, 60.0));
-        assert_eq!(swings.iter().map(|s| (s.shift, s.ticks)).collect::<Vec<_>>(), [(0, 3), (12, 1)], "one swing per distinct play, ticks re-derived from the played root");
+        assert_eq!(swings.iter().map(|s| (s.shift, s.ticks)).collect::<Vec<_>>(), [(0, Some(3)), (12, Some(1))], "one swing per distinct play, ticks re-derived from the played root");
         assert!(swings.iter().all(|s| s.up > s.down), "the register bends further up than down: {swings:?}");
         let json = heard.stats.json();
         assert_eq!(json["lanes"][0]["effects"][1], json!({ "at": "1.9", "effect": "arp", "steps": 30, "steps_per_second": 60.0 }));
