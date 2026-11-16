@@ -9,7 +9,8 @@ fn main() -> std::io::Result<()> {
     for made in recipes::all() {
         let bytes = brr::encode(&made.pcm, made.restart.map(|r| r / brr::BLOCK));
         total += bytes.len();
-        println!("{:<10} {:>6} bytes  {:>6} samples  restart {:<6}  {:?}", made.name, bytes.len(), made.pcm.len(), made.restart.map_or("-".into(), |r| r.to_string()), made.tune);
+        let peak = made.pcm.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+        println!("{:<10} {:>6} bytes  {:>6} samples  restart {:<6}  peak {peak:>5}  first 250 ms rms {:>5.0}  {:?}", made.name, bytes.len(), made.pcm.len(), made.restart.map_or("-".into(), |r| r.to_string()), recipes::body_rms(&made.pcm, made.restart), made.tune);
         std::fs::write(dir.join(format!("{}.brr", made.name)), bytes)?;
     }
     println!("{total} bytes in all");

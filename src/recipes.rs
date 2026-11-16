@@ -9,6 +9,12 @@ pub const RATE: f64 = 32_000.0;
 
 const PEAK: f64 = 15_500.0;
 
+// a pitched sample's first quarter second (looping round its loop if it's shorter) is pressed to this rms, so `vol 10` sounds
+// about as loud on any instrument; the peak cap wins where a spiky wave would pass it. drums are pressed by their peak
+const LOUD: f64 = 4_500.0;
+
+const BODY: usize = 8_000;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Tune { Root(f64), Stored(u32) }
 
@@ -87,8 +93,21 @@ fn press(name: &'static str, wave: &[f64], restart: Option<usize>, tune: Tune) -
     }
     assert!(wave.len().is_multiple_of(BLOCK), "{name} isn't whole blocks");
     let peak = wave.iter().fold(0.0f64, |m, s| m.max(s.abs())).max(1e-9);
-    let pcm = wave.iter().map(|s| (s * PEAK / peak).round() as i16).collect();
+    let gain = match tune {
+        Tune::Root(_) => (LOUD / body_rms(&wave, restart).max(1e-9)).min(PEAK / peak),
+        Tune::Stored(_) => PEAK / peak,
+    };
+    let pcm = wave.iter().map(|s| (s * gain).round() as i16).collect();
     Made { name, pcm, restart, tune }
+}
+
+pub fn body_rms<T: Copy + Into<f64>>(wave: &[T], restart: Option<usize>) -> f64 {
+    let at = |n: usize| match restart {
+        _ if n < wave.len() => wave[n].into(),
+        Some(r) if r < wave.len() => wave[r + (n - wave.len()) % (wave.len() - r)].into(),
+        _ => 0.0,
+    };
+    ((0..BODY).map(|n| at(n).powi(2)).sum::<f64>() / BODY as f64).sqrt()
 }
 
 fn breathy_lead(name: &'static str, attack: usize, cycle: usize, k: usize, list: &[(f64, f64, f64)], chiff: f64, chiff_hz: f64, seed: u64) -> Made {
@@ -129,6 +148,7 @@ fn plucked(name: &'static str, period: usize, seconds: f64, darkness: f64, brigh
     let tail: Vec<f64> = wave[attack..attack + period * cycles].to_vec();
     wave.truncate(attack);
     wave.extend(tail);
+    for (n, s) in wave.iter_mut().enumerate().take(16) { *s *= rise(n, 16); }
     press(name, &wave, Some(attack), Tune::Root(RATE / period as f64))
 }
 
@@ -191,7 +211,7 @@ pub fn bass() -> Made {
     let (attack, cycle) = (1_280, 256);
     let f0 = RATE / cycle as f64;
     let body = [(1.0, 1.0, 0.0), (2.0, 0.45, 0.5), (3.0, 0.2, 1.0), (4.0, 0.08, 1.7), (5.0, 0.04, 0.3)];
-    let evolving = |n: usize| { let thump = 1.0 + 1.2 * decay(n, 0.012, RATE); partials(n, f0, &body.map(|(h, a, p)| (h, if h > 1.0 { a * thump } else { a }, p))) };
+    let evolving = |n: usize| { let thump = 1.0 + 1.2 * decay(n, 0.012, RATE); rise(n, 96) * partials(n, f0, &body.map(|(h, a, p)| (h, if h > 1.0 { a * thump } else { a }, p))) };
     let (wave, restart) = attack_then_loop(attack, cycle, evolving, |n| partials(n, f0, &body), 512);
     press("bass", &wave, Some(restart), Tune::Root(f0))
 }
@@ -205,7 +225,7 @@ pub fn bell() -> Made {
     let harmonic = |h: f64| [0.5, 1.0, 1.5, 2.0].contains(&h);
     let held = |n: usize| ring.iter().filter(|r| harmonic(r.0)).map(|&(h, a, p, life)| a * decay(attack, life, RATE) * (TAU * h * prime * n as f64 / RATE + p).sin()).sum::<f64>();
     let evolving = |n: usize| {
-        let strike = 1.0 + 2.0 * decay(n, 0.004, RATE);
+        let strike = (1.0 + 2.0 * decay(n, 0.004, RATE)) * rise(n, 24);
         ring.iter().map(|&(h, a, p, life)| a * strike.min(if h > 2.0 { 3.0 } else { 1.5 }) * decay(n, life, RATE) * (TAU * h * prime * n as f64 / RATE + p).sin()).sum::<f64>()
     };
     let (wave, restart) = attack_then_loop(attack, cycle, evolving, held, 2_048);

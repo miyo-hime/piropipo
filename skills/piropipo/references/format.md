@@ -85,12 +85,12 @@ pulse plays C2 through B7 and a triangle C1 through B6, and says so per note.
 
 ## lanes
 
-the profile defines which lanes exist and what they can do. two profiles exist: `nes`
-(the default, true hardware ranges) and `nes-free` (the same four voices stretched to
-the engine's wider edges - pulses A1 through G#8, triangle A0 through G#7). both have
-`pulse1`, `pulse2`, `triangle`, `noise`. parameters follow the lane name (`lane pulse1
-duty 25 vol 9`). a lane appears at most once per pattern, and lanes you don't use can be
-omitted.
+the profile defines which lanes exist and what they can do. three profiles exist: `nes`
+(the default, true hardware ranges), `nes-free` (the same four voices stretched to the
+engine's wider edges - pulses A1 through G#8, triangle A0 through G#7), and `snes` (eight
+sample voices, their own section below). the nes two have `pulse1`, `pulse2`, `triangle`,
+`noise`. parameters follow the lane name (`lane pulse1 duty 25 vol 9`). a lane appears at
+most once per pattern, and lanes you don't use can be omitted.
 
 on `nes`, the pulses take `duty` (12.5, 25, 50, or 75) and `vol` (0 to 15, default 10),
 the noise takes `vol`, and the triangle takes nothing: it has no volume, it's either on
@@ -200,6 +200,121 @@ out and the patterns play once each, in the order they're written.
   `pattern`) can't be listed in a play block, so don't name a pattern after them.
 
 there are no sections or loop markers; the flat play list is the whole structure.
+
+## the snes card
+
+`profile snes` swaps the four nes channels for the super famicom's sound chip: eight voices
+that each play a sample, at the chip's own 32 khz, in stereo. the grid is the same grid;
+what changes is what a lane is.
+
+```
+song "hearth" tempo 88 profile snes echo 176ms feedback 35 wet 35
+
+pattern a bars 1 grid 16
+
+lane voice1 inst flute vol 12 echo on
+  1.1: F#5 x6
+  1.7: A5 x2
+  1.9: D6 x8 vib 20ct 5hz 300ms
+
+lane voice2 inst harp vol 11 pan -5 echo on
+  1.1: A3 x4
+  1.5: F#4 x4
+  1.9: A3 x4
+  1.13: F#4 x4
+
+lane voice6 inst pizz vol 15
+  1.1: D2 x6
+  1.7: - x2
+  1.9: A1 x6
+  1.15: - x2
+
+lane voice8 inst kit vol 10
+  1.1: - x4
+  1.5: D#3 x4
+  1.9: - x4
+  1.13: D#3 x4
+```
+
+the lanes are `voice1` through `voice8`, all alike: what a voice sounds like is the
+instrument its lane loads, so the same lane can be a flute in one pattern and a bell in the
+next. a lane takes:
+
+- `inst <name>` - required. the bank is below; anything else is an error that lists it.
+- `vol` - 0 to 15, default 10. every pitched sample in the bank is pressed to the same
+  loudness over its first quarter second, so `vol 10` is about as loud on any of them.
+- `pan` - -8 (left) through 0 (centre) to 8 (right).
+- `echo on` - sends the voice to the echo (off by default).
+- `adsr A,D,S,R` - overrides the instrument's envelope, in the chip's own register units
+  (attack 0-15, decay 0-7, sustain level 0-7, sustain release 0-31). 15,7,7,0 is an instant
+  attack held at full.
+
+the echo is the chip's, one for the whole song, set on the song line: `echo` is the delay,
+16ms to 240ms in steps of 16; `feedback` (-100 to 100, default 30) and `wet` (0 to 100,
+default 35) are percents. without `echo` there is none, and `feedback` or `wet` alone are
+errors. the nes cards refuse all three.
+
+### the bank
+
+every sample is made by piro's own recipes (src/recipes.rs): partials, plucked delay lines,
+filtered noise. none of it comes from a game or a soundfont, and a test rebuilds each one
+and checks it byte for byte.
+
+| inst | plays | sounds like |
+|---|---|---|
+| `flute` | C4-C7 | breath, then a pure body; the lead |
+| `ocarina` | C4-C7 | nearly a sine |
+| `harp` | C3-C7 | a plucked string that rings about two seconds |
+| `pizz` | E1-E4 | a plucked low string, short |
+| `musicbox` | C4-C8 | a bright tine that rings out |
+| `epiano` | C3-B6 | electric piano |
+| `strings` | G2-F#6 | an ensemble of three, swelling in over 160 ms |
+| `accordion` | C3-B6 | two reeds tuned a little apart |
+| `choir` | C3-C6 | "aah", swelling in over a quarter second |
+| `organ` | C2-B6 | drawbars |
+| `bass` | C1-C4 | round, slowly fading |
+| `bell` | G2-C6 | a church bell |
+| `kit` | any | the letter picks the drum: C kick, C# rim, D snare, D# brush, E frame drum, F tom, F# hat, G shaker, G# sleigh bells, A ting. the octave is ignored, and A# and B are empty |
+| `noise` | any | the chip's noise; the pitch picks the nearest of its 31 noise clocks, octave included |
+
+### what's different on the snes
+
+- **vib** swings the cents you ask, both ways alike: the pitch register has 14 bits, so
+  there are no ticks to round to. the rates and delay read as on nes.
+- **arp** keeps the nes pacing (and check's rules for it). it moves the pitch only; the
+  note is struck once.
+- **from** is a glide, not a stepped walk, on the same schedule: it lands where the nes
+  walk would have.
+- **fade** runs the voice's volume down to 0 by the note's key-off.
+- **duty** doesn't exist here. tone colour is the instrument.
+- the kit and the noise take `vol` and `fade` and nothing that bends a pitch.
+- **every note is struck.** the chip has no legato: a new note restarts the envelope, so
+  `strings` swells again on each note. a pad is a long note.
+- **the release is short.** a key-off fades the voice in about 8 ms, and piro keys off one
+  release before the written end, so a rest is silent from its first sample. a note under
+  16 ms keys off halfway and lets its release spill past its end. long tails come from the
+  echo or from an instrument that decays on its own (harp, bell).
+- a low note can sit up to about 1.6 cents off concert: the pitch register's last step.
+
+### what check holds the snes to
+
+- **range** per instrument, the table above, for written notes and everything an effect
+  reaches.
+- **sound ram.** the chip has 64 kb, and a song has to fit: each sample it plays (once,
+  however many lanes load it), each drum the kit actually strikes, the echo buffer (2 kb
+  per 16 ms of delay), and 8 kb for the driver and the song. over that is an error naming
+  every item and its size; check reports the spend either way.
+- **one noise clock.** two noise lanes sounding at once must ask for the same clock.
+
+the report grows a `chip` block: the sound ram spend, the echo, and the **tail** - how
+long the chip keeps ringing after the last sample of the file. a song that ends while the
+echo still rings gets a `tail-cut` warning. if the game loops it, render with
+`piro track --loop` (and `piro check --loop`): the song plays through the chip twice and
+the second pass is kept, so the end's echo is already sounding at the start and the loop
+has no seam. a song that ends for good should write rests at the end and let it ring out.
+
+`--events` adds `inst`, `pan` and `echo` to every snes note, `drum` on the kit, and
+`noise_clock_hz` on the noise.
 
 ## what `piro check` promises
 
