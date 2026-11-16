@@ -193,6 +193,7 @@ pub fn take_looped(text: &str, looped: bool) -> Result<Take, Vec<Remark>> {
     take.stats.peak_dbfs = peak_dbfs(&peaks);
     take.stats.saturated = take.stereo.as_ref().map_or_else(|| saturated(&take.samples), |s| saturated(s.as_flattened()));
     let mut warnings: Vec<Remark> = take.stats.lanes.iter().filter_map(hush).collect();
+    warnings.extend(fading_ties(&take.song));
     if take.stats.saturated > 0 { warnings.push(Remark::loose("saturation", format!("{} sample{} sit at full scale; the mix is hitting the rail and may be clipping", take.stats.saturated, if take.stats.saturated == 1 { "" } else { "s" }))); }
     if let Some(chip) = take.stats.chip.as_ref().filter(|c| !c.looped && c.tail.ms > 0.0 && peak_dbfs(&[c.tail.peak]).is_some_and(|p| p > -40.0)) {
         warnings.push(Remark::loose("tail-cut", format!("the file ends while the chip still rings (peak {:.1} dbfs, {:.0} ms more); write rests at the end to let it ring out, or render with --loop if the song loops", peak_dbfs(&[chip.tail.peak]).unwrap_or(-96.0), chip.tail.ms)));
@@ -333,6 +334,34 @@ fn flourish(tempo: u32, pattern: &Pattern, note: &Note, shifts: &[i8], fine: boo
     }
 }
 
+// a legato chain is one key-on, so an instrument whose envelope fades while held (harp, pizz, bell...) dies partway through
+// a chain longer than its fade, and the rest of the chain is silence
+fn fading_ties(song: &Song) -> Vec<Remark> {
+    let Ok(card) = profile::card(song.profile.as_deref()) else { return Vec::new() };
+    let mut found = Vec::new();
+    for pattern in song.patterns.iter().filter(|p| song.setlist.iter().any(|c| c.pattern == p.name)) {
+        let slot = 60.0 * f64::from(pattern.beats) / (f64::from(song.tempo.max(1)) * f64::from(pattern.grid.max(1)));
+        for lane in &pattern.lanes {
+            let Some(seat) = card.part(&lane.name).ok().and_then(|p| p.seat(&lane.params).ok()) else { continue };
+            let (Some(patch), Some(inst), Some(adsr)) = (seat.setup.patch, seat.inst, seat.adsr()) else { continue };
+            let Some(fade) = adsr.sustain_seconds().filter(|_| patch.legato).map(|s| adsr.attack_seconds() + adsr.decay_seconds() + s) else { continue };
+            let mut notes: Vec<&Note> = lane.notes.iter().filter(|n| n.pitch.is_some()).collect();
+            notes.sort_by_key(|n| n.at.tick(pattern.grid));
+            let mut i = 0;
+            while i < notes.len() {
+                let mut j = i;
+                while j + 1 < notes.len() && notes[j].at.tick(pattern.grid) + u64::from(notes[j].len) == notes[j + 1].at.tick(pattern.grid) { j += 1; }
+                let held = (notes[j].at.tick(pattern.grid) + u64::from(notes[j].len) - notes[i].at.tick(pattern.grid)) as f64 * slot;
+                if j > i && held > fade {
+                    found.push(Remark { code: "legato-fades", message: format!("these {} tied notes are one key-on held {held:.1} s, and the {}'s envelope fades to silence in {fade:.1} s, so the end of the chain is silent; strike it again (a rest between two notes) or turn legato off", j - i + 1, inst.name), pattern: Some(pattern.name.clone()), lane: Some(lane.name.clone()), at: Some(notes[i].at), line: Some(notes[i].line) });
+                }
+                i = j + 1;
+            }
+        }
+    }
+    found
+}
+
 fn hush(solo: &Solo) -> Option<Remark> {
     (solo.voiced() && !solo.sounding).then(|| Remark { code: "silent-lane", message: "this lane has notes but renders silent".to_owned(), pattern: Some(solo.pattern.clone()), lane: Some(solo.lane.clone()), at: None, line: Some(solo.line) })
 }
@@ -385,6 +414,17 @@ mod tests {
     }
 
     fn pos(bar: u32, slot: u32) -> Position { Position { bar, slot } }
+
+    #[test]
+    fn a_legato_chain_longer_than_its_instruments_fade_is_named() {
+        let fading = take("song \"s\" tempo 60 profile snes\npattern p bars 2 grid 4\nlane voice1 inst harp legato on\n  1.1: C4 x4\n  2.1: E4 x4\nlane voice2 inst strings legato on\n  1.1: C4 x4\n  2.1: E4 x4\n").unwrap();
+        let warned: Vec<_> = fading.warnings.iter().filter(|w| w.code == "legato-fades").collect();
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert_eq!((warned[0].lane.as_deref(), warned[0].at), (Some("voice1"), Some(pos(1, 1))));
+        assert!(warned[0].message.starts_with("these 2 tied notes are one key-on held 8.0 s, and the harp's envelope fades to silence in "), "{}", warned[0].message);
+        let struck = take("song \"s\" tempo 60 profile snes\npattern p bars 2 grid 4\nlane voice1 inst harp legato on\n  1.1: C4 x3\n  1.4: - x1\n  2.1: E4 x4\n").unwrap();
+        assert!(struck.warnings.iter().all(|w| w.code != "legato-fades"), "a rest strikes the harp again");
+    }
 
     #[test]
     fn a_looped_snes_take_runs_its_end_straight_into_its_start() {
