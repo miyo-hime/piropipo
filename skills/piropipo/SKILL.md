@@ -1,6 +1,6 @@
 ---
 name: piropipo
-description: Compose chiptune music and game sound effects as wav files with the piro CLI and its .piro track format. Use when asked to write, edit, or verify 8-bit / NES-style music or sfx.
+description: Compose chiptune music and game sound effects as wav files with the piro CLI and its .piro track format. Use when asked to write, edit, or verify 8-bit / NES-style or 16-bit / SNES-style music or sfx.
 ---
 
 # composing with piro
@@ -67,6 +67,34 @@ doorbell. a starting point, not a cage.
 - **a slide (`from`) is a scoop, not a glissando.** the written pitch is the note you'll
   hear; `from` names the departure and the walk is quick (~60 steps/s), chromatic, honest
   about being stepped.
+
+## the snes card's idioms
+
+`profile snes` is eight sampled voices with an echo (format.md has the card). the grid is the
+same; the craft shifts from tone colour by duty to tone colour by instrument, and from what the
+chip refuses to what the mix hides.
+
+- **balance by lane, not by song.** the stats' per-bar loudness is the whole mix; for who sits
+  where, render each lane alone (delete the others in a copy) and compare levels. a lead about
+  6-8 db over each accompaniment voice reads as a lead. a pure tone (`flute`, `ocarina`) wants a
+  step more `vol` than a buzzy one (`accordion`, `choir`) to sound as present.
+- **peaks are not loudness.** a noise snap or a dry drum can read -45 db rms and peak a few db
+  under the melody. check a percussive lane's peak, not just its rms; `--events` and a solo
+  render tell you which.
+- **dry hits poke out.** a kit lane without `echo on` sits in front of everything that has it.
+  in a quiet piece, a brush at `vol 1-2` with echo, or none.
+- **pads are legato.** a pad that re-strikes swells and drops on every chord, and the drop shows
+  most at a loop point. `legato on` on strings, choir and organ; end the pad's last note on the
+  pattern's last slot so it ties across the loop. on an instrument that fades while held (harp,
+  pizz, bell, musicbox) a long tie goes silent; check warns `legato-fades`.
+- **noise wants a high clock.** below about C6 the chip's noise steps are audible as crackle.
+  wind, breath and steam sit at C7-C8 with a low `vol`, a slow attack (`adsr 3,...`: a low attack
+  number is slow) and a `fade`.
+- **seams are texture as much as samples.** `--loop` makes the jump sample-continuous, but a
+  dense last bar dropping into a sparse first bar still sounds like a reset. thin the end, or let
+  something from the end carry into bar one.
+- **a fixed release cuts.** a key-off fades in 8 ms; a melody's last note before a rest or the
+  loop wants `fade` if it shouldn't stop short.
 
 ## sound effects
 
