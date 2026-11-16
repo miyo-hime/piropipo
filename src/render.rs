@@ -99,7 +99,7 @@ fn charged(lane: &str, breach: Breach) -> RenderError {
 }
 
 // what one song carries from play to play: the nes card's macro books, and the snes chip itself, echo and tails and all
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Stencils { vibratos: Vec<[u8; 3]>, fades: Vec<Vec<u8>>, stage: Option<snes::Stage> }
 
 impl Stencils {

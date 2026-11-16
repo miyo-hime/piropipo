@@ -181,6 +181,11 @@ pub fn take_looped(text: &str, looped: bool) -> Result<Take, Vec<Remark>> {
     }
     let haunted = ghosts(&song);
     if !haunted.is_empty() { return Err(haunted); }
+    if let Some(all) = stereo.as_mut().filter(|_| looped) {
+        let ahead = onward(&song, &stencils, (rate / 20) as usize).map_err(|e| vec![e])?;
+        seam(all, &ahead);
+        for (mono, [l, r]) in samples.iter_mut().zip(all.iter()) { *mono = ((i32::from(*l) + i32::from(*r)) / 2) as i16; }
+    }
     let chip = spend.zip(stencils.tail()).map(|(spend, tail)| Chip { spend, room, tail, looped });
     let mut take = Take { samples, stereo, rate, stats: Stats { seconds: 0.0, peak_dbfs: None, saturated: 0, lanes, gauges: None, chip }, warnings: Vec::new(), rubs: harmony::rubs(&song), song, plays, strikes: None };
     let peaks = take.peaks().into_owned();
@@ -194,6 +199,29 @@ pub fn take_looped(text: &str, looped: bool) -> Result<Take, Vec<Remark>> {
     }
     take.warnings = warnings;
     Ok(take)
+}
+
+// what the end of the file runs straight into: the start of the next pass, played on from where the end left the chip
+fn onward(song: &Song, stencils: &Stencils, want: usize) -> Result<Vec<[i16; 2]>, Remark> {
+    let mut chip = stencils.clone();
+    let mut ahead = Vec::new();
+    for cue in song.setlist.iter() {
+        if ahead.len() >= want { break; }
+        let pattern = song.pattern(&cue.pattern).expect("the copyist refuses a play line that names no pattern");
+        let pressed = render::transposed(song, pattern, cue).and_then(|moved| render::press(song, &moved, &mut chip)).map_err(|e| misheard(e, pattern))?;
+        ahead.extend(pressed.stereo.unwrap_or_default());
+    }
+    Ok(ahead)
+}
+
+// a looped file's first moments fade from what its end runs into to the start as written, so the jump back is one continuous
+// signal even through a note a legato lane holds across it (its phase can't land where the first pass left it)
+fn seam(start: &mut [[i16; 2]], ahead: &[[i16; 2]]) {
+    let span = ahead.len().min(start.len());
+    for (i, (s, a)) in start.iter_mut().zip(ahead).enumerate().take(span) {
+        let w = i as f64 / span as f64;
+        *s = std::array::from_fn(|c| (f64::from(a[c]) * (1.0 - w) + f64::from(s[c]) * w).round() as i16);
+    }
 }
 
 // the song-wide things a card can refuse before a note renders: an echo it doesn't have, and a sound ram the song overfills
@@ -356,6 +384,21 @@ mod tests {
     }
 
     fn pos(bar: u32, slot: u32) -> Position { Position { bar, slot } }
+
+    #[test]
+    fn a_looped_snes_take_runs_its_end_straight_into_its_start() {
+        let text = "song \"s\" tempo 120 profile snes echo 96ms feedback 50\npattern a bars 2 grid 4\nlane voice1 inst strings vol 12 legato on echo on\n  1.1: A3 x4\n  2.1: C#4 x4\nlane voice2 inst harp vol 9 echo on\n  1.1: E4 x2\n  1.3: - x6\n";
+        let looped = take_looped(text, true).unwrap();
+        let once = take_looped(text, false).unwrap();
+        let wav = looped.stereo.as_ref().unwrap();
+        let mut steps: Vec<i32> = wav.windows(2).map(|w| (i32::from(w[1][0]) - i32::from(w[0][0])).abs()).collect();
+        steps.sort_unstable();
+        let seam = (i32::from(wav[0][0]) - i32::from(wav[wav.len() - 1][0])).abs();
+        assert!(seam <= steps[steps.len() * 99 / 100], "the jump back steps {seam}, more than 99% of the steps inside the song");
+        assert_ne!(wav[..1_600], once.stereo.as_ref().unwrap()[..1_600], "the loop's start already carries the end's echo and its held pad");
+        assert_eq!((wav.len(), &looped.plays), (once.stereo.as_ref().unwrap().len(), &once.plays), "a loop is the same length, its plays on the same samples");
+        assert!(looped.warnings.iter().all(|w| w.code != "tail-cut") && once.warnings.iter().any(|w| w.code == "tail-cut"));
+    }
 
     fn refusal(text: &str) -> Remark {
         let Err(errors) = take(text) else { panic!("expected a refusal") };
