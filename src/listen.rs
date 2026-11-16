@@ -211,6 +211,7 @@ fn onward(song: &Song, stencils: &Stencils, want: usize) -> Result<Vec<[i16; 2]>
         let pressed = render::transposed(song, pattern, cue).and_then(|moved| render::press(song, &moved, &mut chip)).map_err(|e| misheard(e, pattern))?;
         ahead.extend(pressed.stereo.unwrap_or_default());
     }
+    ahead.truncate(want);
     Ok(ahead)
 }
 
@@ -397,6 +398,12 @@ mod tests {
         assert!(seam <= steps[steps.len() * 99 / 100], "the jump back steps {seam}, more than 99% of the steps inside the song");
         assert_ne!(wav[..1_600], once.stereo.as_ref().unwrap()[..1_600], "the loop's start already carries the end's echo and its held pad");
         assert_eq!((wav.len(), &looped.plays), (once.stereo.as_ref().unwrap().len(), &once.plays), "a loop is the same length, its plays on the same samples");
+        let twice = take_looped(&text.replace("pattern a", "play\n  a\n  a\npattern a"), false).unwrap();
+        let second = &twice.stereo.as_ref().unwrap()[wav.len()..];
+        assert_eq!(wav[1_600..], second[1_600..], "past its first 50 ms, a loop is exactly the second time through a song played twice");
+        let thrice = take_looped(&text.replace("pattern a", "play\n  a\n  a\n  a\npattern a"), false).unwrap();
+        let after = &thrice.stereo.as_ref().unwrap()[2 * wav.len()..];
+        assert_eq!((wav[wav.len() - 1], wav[0]), (second[wav.len() - 1], after[0]), "the jump back lands on the very sample the song plays next");
         assert!(looped.warnings.iter().all(|w| w.code != "tail-cut") && once.warnings.iter().any(|w| w.code == "tail-cut"));
     }
 
