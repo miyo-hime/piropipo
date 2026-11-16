@@ -146,3 +146,107 @@ pub fn tail(chip: &Chip) -> Tail {
     }
     Tail { ms: heard as f64 * 1000.0 / f64::from(RATE), peak }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bank::BANK;
+    use crate::render::Stencils;
+
+    fn song(text: &str) -> Song { Song::parse(text).unwrap_or_else(|errors| panic!("the test score doesn't parse: {errors:?}")) }
+
+    fn heard(head: &str, lanes: &str) -> Vec<[i16; 2]> {
+        let song = song(&format!("song \"s\" tempo 120 profile snes{head}\npattern p bars 1 grid 4\n{lanes}"));
+        press(&song, &song.patterns[0], &mut None).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    fn rises(samples: &[[i16; 2]]) -> usize { samples.windows(2).filter(|w| w[0][0] < 0 && w[1][0] >= 0).count() }
+
+    #[test]
+    fn every_playable_pitch_lands_within_half_a_register_step_of_concert() {
+        for inst in BANK {
+            let Kind::Tone(sample) = inst.kind else { continue };
+            let bank::Tune::Root(root) = sample.tune else { continue };
+            for pitch in inst.low..=inst.high {
+                let concert = 440.0 * 2f64.powf((f64::from(pitch) - 69.0) / 12.0);
+                let reg = inst.register(f64::from(pitch)).unwrap_or_else(|| panic!("{} {} has no register", inst.name, profile::named(pitch)));
+                let off = 1200.0 * (root * f64::from(reg) / 4096.0 / concert).log2();
+                let step = 1200.0 * (1.0 + 0.5 / f64::from(reg)).log2();
+                assert!(off.abs() <= step + 1e-9, "{} {} sounds {off:+.2} cents off, more than the register's half step of {step:.2}", inst.name, profile::named(pitch));
+            }
+        }
+    }
+
+    #[test]
+    fn a_held_note_sounds_its_pitch_in_the_wav() {
+        // two seconds of a4 on the ocarina, nearly a sine: 880 upward zero crossings, give or take the attack
+        let out = heard("", "lane voice1 inst ocarina\n  1: A4 x4\n");
+        assert_eq!(out.len(), 64_000);
+        let crossings = rises(&out[2_000..62_000]);
+        assert!((crossings as f64 - 60_000.0 / 32_000.0 * 440.0).abs() <= 2.0, "{crossings} crossings in 1.875 s");
+    }
+
+    #[test]
+    fn a_rest_is_silent_to_the_sample_once_the_release_is_spent() {
+        let out = heard("", "lane voice1 inst organ\n  1: C4 x1\n  2: - x1\n  3: E4 x1\n");
+        let quarter = 16_000;
+        assert!(out[..quarter].iter().any(|s| s[0] != 0));
+        assert!(out[quarter..2 * quarter].iter().all(|s| *s == [0, 0]), "the key-off lands one release early, so the rest is clean from its first sample");
+        assert!(out[2 * quarter..2 * quarter + 64].iter().any(|s| s[0] != 0), "the next note speaks at once");
+        assert!(out[3 * quarter..].iter().all(|s| *s == [0, 0]));
+    }
+
+    #[test]
+    fn pan_moves_the_voice_between_the_speakers() {
+        let level = |pan: &str| { let out = heard("", &format!("lane voice1 inst organ{pan}\n  1: A4 x4\n")); [0, 1].map(|c| out.iter().map(|s| i64::from(s[c]).pow(2)).sum::<i64>()) };
+        let [l, r] = level(" pan -8");
+        assert!(l > 0 && r == 0, "hard left leaves the right speaker silent: {l} {r}");
+        let [l, r] = level("");
+        assert_eq!(l, r, "centre is the same on both sides");
+        let [l, r] = level(" pan 4");
+        assert!(r > l && l > 0);
+    }
+
+    #[test]
+    fn the_echo_repeats_the_voices_that_send_to_it() {
+        let wet = heard(" echo 64ms feedback 0 wet 100", "lane voice1 inst organ echo on\n  1: A4 x1\n");
+        let dry = heard(" echo 64ms feedback 0 wet 100", "lane voice1 inst organ\n  1: A4 x1\n");
+        let quarter = 16_000;
+        assert!(dry[quarter..].iter().all(|s| *s == [0, 0]), "a voice that doesn't send is dry");
+        let tail: Vec<usize> = wet[quarter..].iter().enumerate().filter(|(_, s)| **s != [0, 0]).map(|(i, _)| i).collect();
+        let last = *tail.last().unwrap();
+        assert!(!tail.is_empty() && last <= 4 * 512 + 16, "with no feedback the echo is one repeat, 64 ms behind: rings to {last}");
+    }
+
+    #[test]
+    fn a_fade_lands_on_silence_by_the_key_off() {
+        let out = heard("", "lane voice1 inst organ\n  1: A4 x4 fade\n");
+        let loud = |range: std::ops::Range<usize>| out[range].iter().map(|s| s[0].unsigned_abs()).max().unwrap();
+        assert!(loud(1_000..4_000) > 6 * loud(56_000..60_000));
+        assert!(out[64_000 - RELEASE as usize..].iter().all(|s| *s == [0, 0]));
+    }
+
+    #[test]
+    fn the_kit_hears_the_letter_and_not_the_octave() {
+        let snare = |octave: u8| heard("", &format!("lane voice8 inst kit\n  1: D{octave} x1\n"));
+        assert_eq!(snare(2), snare(6));
+        assert_ne!(snare(2), heard("", "lane voice8 inst kit\n  1: C2 x1\n"));
+    }
+
+    #[test]
+    fn the_chip_carries_from_play_to_play() {
+        let song = song("song \"s\" tempo 120 profile snes echo 160ms\npattern p bars 1 grid 4\nlane voice1 inst organ echo on\n  1: A4 x1\n  2: - x3\npattern q bars 1 grid 4\nlane voice1 inst organ\n  1: - x4\n");
+        let mut stencils = Stencils::default();
+        crate::render::press(&song, &song.patterns[0], &mut stencils).unwrap();
+        let after = crate::render::press(&song, &song.patterns[1], &mut stencils).unwrap().stereo.unwrap();
+        let fresh = crate::render::press(&song, &song.patterns[1], &mut Stencils::default()).unwrap().stereo.unwrap();
+        assert!(fresh.iter().all(|s| *s == [0, 0]));
+        assert!(after[..8_000].iter().any(|s| *s != [0, 0]), "the echo from the first play rings on into the second");
+    }
+
+    #[test]
+    fn the_same_score_presses_the_same_bytes() {
+        let text = "lane voice1 inst flute echo on\n  1: C5 x2 vib 30ct 5hz\n  3: E5 x2 from C5\nlane voice2 inst harp pan -3\n  1: C4 x4 arp 0,4,7\nlane voice7 inst noise\n  1: C6 x1 fade\nlane voice8 inst kit\n  2: D3 x1\n";
+        assert_eq!(heard(" echo 96ms", text), heard(" echo 96ms", text));
+    }
+}
