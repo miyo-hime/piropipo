@@ -280,7 +280,7 @@ and checks it byte for byte.
 | `bass` | C1-C4 | round, slowly fading |
 | `bell` | G2-C6 | a church bell |
 | `kit` | any | the letter picks the drum: C kick, C# rim, D snare, D# brush, E frame drum, F tom, F# hat, G shaker, G# sleigh bells, A ting. the octave is ignored, and A# and B are empty |
-| `noise` | any | the chip's noise; the pitch picks the nearest of its 31 noise clocks, octave included |
+| `noise` | any | the chip's noise; the pitch picks the nearest of its 31 noise clocks, octave included. under about 1 khz (below C6) the clock's steps are audible, a crackle rather than a hiss: wind and breath want C7 or higher |
 
 ### what's different on the snes
 
