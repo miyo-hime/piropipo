@@ -1,4 +1,3 @@
-use crate::dsp;
 use crate::profile::{self, Breach, Engine, Flaw, Part, Setup, Voice, named};
 use crate::score::{Bend, Cue, MOST_BEATS, Note, Ornaments, Pattern, Position, Song};
 use std::borrow::Cow;
@@ -101,11 +100,11 @@ fn charged(lane: &str, breach: Breach) -> RenderError {
 
 // what one song carries from play to play: the nes card's macro books, and the snes chip itself, echo and tails and all
 #[derive(Debug, Default)]
-pub struct Stencils { vibratos: Vec<[u8; 3]>, fades: Vec<Vec<u8>>, chip: Option<dsp::Chip> }
+pub struct Stencils { vibratos: Vec<[u8; 3]>, fades: Vec<Vec<u8>>, stage: Option<snes::Stage> }
 
 impl Stencils {
     // how long the chip keeps sounding after the last play, and how loud that tail starts; None on a card with no tails
-    pub fn tail(&self) -> Option<Tail> { self.chip.as_ref().map(snes::tail) }
+    pub fn tail(&self) -> Option<Tail> { self.stage.as_ref().map(snes::tail) }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -122,7 +121,7 @@ pub fn press(song: &Song, pattern: &Pattern, stencils: &mut Stencils) -> Result<
     match card.engine {
         Engine::Famicom => Ok(Pressed { mono: perform(&engrave(song, pattern, stencils)?)?, stereo: None }),
         Engine::Sdsp => {
-            let stereo = snes::press(song, pattern, &mut stencils.chip)?;
+            let stereo = snes::press(song, pattern, &mut stencils.stage)?;
             Ok(Pressed { mono: stereo.iter().map(|[l, r]| ((i32::from(*l) + i32::from(*r)) / 2) as i16).collect(), stereo: Some(stereo) })
         }
     }

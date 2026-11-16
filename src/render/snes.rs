@@ -30,7 +30,12 @@ impl Contour {
     fn turns(&self, t: u64) -> bool { matches!(self, Contour::Steps(steps) if steps.iter().any(|(at, _)| *at == t)) }
 }
 
-struct Strike { voice: usize, start: u64, off: u64, source: Source, adsr: Adsr, echo: bool, level: [i32; 2], fade: bool, contour: Contour, tone: Option<&'static Instrument>, fixed: u16, clock: Option<u8> }
+// `off` is None when a legato lane ties the note into the next one; `tied` when this note continues the last without a key-on
+struct Strike { voice: usize, start: u64, end: u64, off: Option<u64>, tied: bool, source: Source, adsr: Adsr, echo: bool, level: [i32; 2], fade: bool, contour: Contour, tone: Option<&'static Instrument>, fixed: u16, clock: Option<u8> }
+
+// the chip, and which voices the last play left held into this one by a legato lane, and on what
+#[derive(Debug, Clone)]
+pub struct Stage { chip: Chip, held: [Option<&'static Instrument>; VOICES] }
 
 impl Strike {
     fn pitch(&self, t: u64) -> u16 { self.tone.map_or(self.fixed, |inst| inst.register(self.contour.at(t)).unwrap_or(FULL_PITCH)) }
@@ -38,7 +43,8 @@ impl Strike {
     // a fade runs the volume down to nothing by the key-off, so the release that follows is silent
     fn volume(&self, t: u64) -> [i32; 2] {
         if !self.fade { return self.level; }
-        let left = self.off.saturating_sub(t) as f64 / (self.off - self.start).max(1) as f64;
+        let stop = self.off.unwrap_or(self.end);
+        let left = stop.saturating_sub(t) as f64 / (stop - self.start).max(1) as f64;
         self.level.map(|v| (f64::from(v) * left).round() as i32)
     }
 }
@@ -47,7 +53,7 @@ impl Strike {
 // a note too short for that keys off halfway and lets its release spill
 fn gate(start: u64, end: u64) -> u64 { if end - start > 2 * RELEASE { end - RELEASE } else { start + (end - start) / 2 } }
 
-pub fn press(song: &Song, pattern: &Pattern, chip: &mut Option<Chip>) -> Result<Vec<[i16; 2]>, RenderError> {
+pub fn press(song: &Song, pattern: &Pattern, stage: &mut Option<Stage>) -> Result<Vec<[i16; 2]>, RenderError> {
     let card = &SNES;
     let room = card.room(song).map_err(|breach| charged("", breach))?;
     if !(1..=255).contains(&song.tempo) { return Err(RenderError::Tempo(song.tempo)); }
@@ -56,13 +62,17 @@ pub fn press(song: &Song, pattern: &Pattern, chip: &mut Option<Chip>) -> Result<
     if let Some(stray) = pattern.lanes.iter().find_map(|l| card.part(&l.name).err()) { return Err(charged("", stray)); }
     let at = |units: u64| u64::try_from(clock_at(RATE, tempo, staff.grid, units)).unwrap_or(u64::MAX);
     let span = u64::from(pattern.bars) * u64::from(pattern.grid) * staff.unit;
-    let mut strikes = Vec::new();
+    let len = at(span);
+    let held = stage.as_ref().map_or([None; VOICES], |s| s.held);
+    let mut strikes: Vec<Strike> = Vec::new();
+    let mut holds = [None; VOICES];
     for (voice, part) in card.parts.iter().enumerate() {
         let Some(lane) = pattern.lanes.iter().find(|l| l.name == part.name) else { continue };
         let name = lane.name.as_str();
         let seat = part.seat(&lane.params).map_err(|breach| charged(name, breach))?;
         let Some(inst) = seat.inst else { continue };
-        let (pan, echo) = seat.setup.patch.map_or((0, false), |p| (i32::from(p.pan), p.echo));
+        let (pan, echo, legato) = seat.setup.patch.map_or((0, false, false), |p| (i32::from(p.pan), p.echo, p.legato));
+        let opened = strikes.len();
         let mut notes: Vec<_> = lane.notes.iter().collect();
         notes.sort_by_key(|n| n.at.tick(pattern.grid));
         let mut cursor = 0;
@@ -103,22 +113,42 @@ pub fn press(song: &Song, pattern: &Pattern, chip: &mut Option<Chip>) -> Result<
                     Contour::Glide { from: f64::from(*from), to: written, start, land }
                 }
             };
-            strikes.push(Strike { voice, start, off: gate(start, end), source, adsr, echo, level, fade: note.ornaments.fade, contour, tone, fixed, clock });
+            // a legato note ties into one that starts the moment it ends, and the lane's first note ties back to a voice the last play left held on the same instrument
+            let tied = legato && match strikes[opened..].last_mut() {
+                Some(before) if before.end == start => { before.off = None; true }
+                Some(_) => false,
+                None => start == 0 && held[voice].is_some_and(|h| h == inst),
+            };
+            strikes.push(Strike { voice, start, end, off: Some(gate(start, end)), tied, source, adsr, echo, level, fade: note.ornaments.fade, contour, tone, fixed, clock });
+        }
+        if let Some(last) = strikes[opened..].last_mut().filter(|s| legato && s.end == len) {
+            last.off = None;
+            holds[voice] = Some(inst);
         }
     }
     strikes.sort_by_key(|s| (s.start, s.voice));
-    let chip = chip.get_or_insert_with(|| room.map_or_else(|| Chip::new(0, 0, 0), |r| Chip::new(r.delay, r.feedback, r.wet)));
-    let len = at(span);
+    let stage = stage.get_or_insert_with(|| Stage { chip: room.map_or_else(|| Chip::new(0, 0, 0), |r| Chip::new(r.delay, r.feedback, r.wet)), held: [None; VOICES] });
+    // a voice held from the last play that nothing here takes up is let go on this play's first sample
+    for (voice, inst) in stage.held.iter().enumerate() {
+        if inst.is_some() && !strikes.iter().any(|s| s.voice == voice && s.tied && s.start == 0) { stage.chip.key_off(voice); }
+    }
+    stage.held = holds;
+    let chip = &mut stage.chip;
     let mut out = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
     let mut live: [Option<usize>; VOICES] = [None; VOICES];
     let mut next = 0;
     for t in 0..len {
         for (voice, slot) in live.iter_mut().enumerate() {
-            if slot.is_some_and(|i| strikes[i].off == t) { chip.key_off(voice); *slot = None; }
+            if slot.is_some_and(|i| strikes[i].off == Some(t)) { chip.key_off(voice); *slot = None; }
         }
         while let Some(strike) = strikes.get(next).filter(|s| s.start == t) {
             if let Some(clock) = strike.clock { chip.noise_clock(clock); }
-            chip.key_on(strike.voice, Key { source: strike.source, adsr: strike.adsr, pitch: strike.pitch(t), volume: strike.volume(t), echo: strike.echo });
+            if strike.tied && chip.ringing(strike.voice) {
+                chip.pitch(strike.voice, strike.pitch(t));
+                chip.volume(strike.voice, strike.volume(t));
+            } else {
+                chip.key_on(strike.voice, Key { source: strike.source, adsr: strike.adsr, pitch: strike.pitch(t), volume: strike.volume(t), echo: strike.echo });
+            }
             live[strike.voice] = Some(next);
             next += 1;
         }
@@ -134,9 +164,11 @@ pub fn press(song: &Song, pattern: &Pattern, chip: &mut Option<Chip>) -> Result<
     Ok(out)
 }
 
-// let the chip run on with nothing new to play, and measure how long it keeps sounding above -60 dbfs (ten seconds at most)
-pub fn tail(chip: &Chip) -> Tail {
-    let mut chip = chip.clone();
+// the song is over: let go of anything still held, let the chip run on, and measure how long it keeps sounding above -60 dbfs
+// (ten seconds at most)
+pub fn tail(stage: &Stage) -> Tail {
+    let mut chip = stage.chip.clone();
+    for voice in 0..VOICES { chip.key_off(voice); }
     let (mut heard, mut peak) = (0, 0i16);
     for i in 0..u64::from(RATE) * 10 {
         let loudest = chip.sample().iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
@@ -242,6 +274,40 @@ mod tests {
         let fresh = crate::render::press(&song, &song.patterns[1], &mut Stencils::default()).unwrap().stereo.unwrap();
         assert!(fresh.iter().all(|s| *s == [0, 0]));
         assert!(after[..8_000].iter().any(|s| *s != [0, 0]), "the echo from the first play rings on into the second");
+    }
+
+    fn quietest(out: &[[i16; 2]], around: usize) -> f64 {
+        out[around - 600..around + 600].chunks(64).map(|w| (w.iter().map(|s| f64::from(s[0]).powi(2)).sum::<f64>() / 64.0).sqrt()).fold(f64::MAX, f64::min)
+    }
+
+    #[test]
+    fn a_legato_lane_ties_back_to_back_notes_without_a_key_on() {
+        let lanes = |legato: &str| format!("lane voice1 inst strings vol 12{legato}\n  1: A3 x2\n  3: C#4 x2\n");
+        let tied = heard("", &lanes(" legato on"));
+        let struck = heard("", &lanes(""));
+        let steady = quietest(&tied, 8_000);
+        assert!(quietest(&tied, 32_000) > steady / 2.0, "the tie keeps the voice sounding through the change");
+        assert!(quietest(&struck, 32_000) < steady / 10.0, "without legato the voice releases and swells again");
+        assert_eq!(tied[..31_000], struck[..31_000], "everything before the first note's gate is the same render");
+        let rises = |from: usize| tied[from..from + 16_000].windows(2).filter(|w| w[0][0] < 0 && w[1][0] >= 0).count();
+        assert!(rises(36_000) > rises(12_000), "the pitch moves up at the tie: {} then {}", rises(12_000), rises(36_000));
+    }
+
+    #[test]
+    fn a_tie_reaches_across_plays_and_lets_go_when_nothing_takes_it_up() {
+        let song = song("song \"s\" tempo 120 profile snes\npattern p bars 1 grid 4\nlane voice1 inst choir vol 12 legato on\n  1: A3 x4\npattern q bars 1 grid 4\nlane voice1 inst choir vol 12 legato on\n  1: D4 x2\n  3: - x2\npattern r bars 1 grid 4\nlane voice1 inst organ legato on\n  1: D4 x4\n");
+        let mut stencils = Stencils::default();
+        let mut run = |name: &str| crate::render::press(&song, song.pattern(name).unwrap(), &mut stencils).unwrap().stereo.unwrap();
+        let (p, q) = (run("p"), run("q"));
+        let joined: Vec<[i16; 2]> = p.iter().chain(&q).copied().collect();
+        assert!(quietest(&joined, p.len()) > quietest(&joined, 20_000) / 2.0, "the choir sings straight across the barline into the next play");
+        assert!(q[32_000..].iter().all(|s| *s == [0, 0]), "the tied note still keys off before its written rest");
+        let mut fresh = Stencils::default();
+        crate::render::press(&song, song.pattern("p").unwrap(), &mut fresh).unwrap();
+        let moved = crate::render::press(&song, song.pattern("r").unwrap(), &mut fresh).unwrap().stereo.unwrap();
+        let alone = crate::render::press(&song, song.pattern("r").unwrap(), &mut Stencils::default()).unwrap().stereo.unwrap();
+        assert_eq!(moved[RELEASE as usize + 8..], alone[RELEASE as usize + 8..], "a different instrument can't take the tie: the held choir is let go and the organ starts fresh");
+        assert!(crate::render::Stencils::tail(&fresh).is_some_and(|t| t.ms < 1_000.0), "a song's end lets go of anything still held");
     }
 
     #[test]

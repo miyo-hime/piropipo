@@ -248,6 +248,11 @@ next. a lane takes:
 - `adsr A,D,S,R` - overrides the instrument's envelope, in the chip's own register units
   (attack 0-15, decay 0-7, sustain level 0-7, sustain release 0-31). 15,7,7,0 is an instant
   attack held at full.
+- `legato on` - a note that starts the moment the last one ends takes over its voice
+  instead of striking it again: the pitch moves, the envelope carries on. it reaches across
+  patterns (the lane's last note ending on the pattern's last slot ties into the next play's
+  `1.1`, if that lane is legato on the same instrument) and across a `--loop`. pitched
+  instruments only.
 
 the echo is the chip's, one for the whole song, set on the song line: `echo` is the delay,
 16ms to 240ms in steps of 16; `feedback` (-100 to 100, default 30) and `wet` (0 to 100,
@@ -288,11 +293,13 @@ and checks it byte for byte.
 - **fade** runs the voice's volume down to 0 by the note's key-off.
 - **duty** doesn't exist here. tone colour is the instrument.
 - the kit and the noise take `vol` and `fade` and nothing that bends a pitch.
-- **every note is struck.** the chip has no legato: a new note restarts the envelope, so
-  `strings` swells again on each note. a pad is a long note.
+- **every note is struck**, unless its lane is `legato on`: a new note restarts the
+  envelope, so `strings` swells again on each one. pads, choirs and slow lines want legato.
+  on a legato lane, two back-to-back notes at the same pitch sound as one.
 - **the release is short.** a key-off fades the voice in about 8 ms, and piro keys off one
   release before the written end, so a rest is silent from its first sample. a note under
-  16 ms keys off halfway and lets its release spill past its end. long tails come from the
+  16 ms keys off halfway and lets its release spill past its end, and so does a legato note
+  held over a barline that the next play doesn't take up. long tails come from the
   echo or from an instrument that decays on its own (harp, bell).
 - a low note can sit up to about 1.6 cents off concert: the pitch register's last step.
 

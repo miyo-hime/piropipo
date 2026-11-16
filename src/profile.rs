@@ -28,7 +28,7 @@ pub enum Voice { Pulse, Triangle, Noise, Sample, Kit, Hiss }
 
 impl Voice {
     pub fn takes(self) -> &'static [&'static str] {
-        match self { Voice::Pulse => &["duty", "vol"], Voice::Triangle => &[], Voice::Noise => &["vol"], Voice::Sample | Voice::Kit | Voice::Hiss => &["inst", "vol", "pan", "echo", "adsr"] }
+        match self { Voice::Pulse => &["duty", "vol"], Voice::Triangle => &[], Voice::Noise => &["vol"], Voice::Sample | Voice::Kit | Voice::Hiss => &["inst", "vol", "pan", "echo", "adsr", "legato"] }
     }
 
     pub fn marks(self) -> &'static [&'static str] {
@@ -53,6 +53,8 @@ fn pan(value: &str) -> Option<i8> {
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) { return None; }
     value.parse().ok().filter(|p: &i8| (-8..=8).contains(p))
 }
+
+fn switch(value: &str) -> Option<bool> { match value { "on" => Some(true), "off" => Some(false), _ => None } }
 
 fn envelope(value: &str) -> Option<Adsr> {
     let parts: Vec<u8> = value.split(',').map(|p| p.bytes().all(|b| b.is_ascii_digit()).then(|| p.parse().ok()).flatten()).collect::<Option<_>>()?;
@@ -228,14 +230,15 @@ impl Card {
 pub fn clock(pitch: u8) -> u8 { dsp::nearest_clock(440.0 * 2f64.powf((f64::from(pitch) - 69.0) / 12.0)) }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Patch { pub inst: Option<&'static Instrument>, pub pan: i8, pub echo: bool, pub adsr: Option<Adsr> }
+// `legato`: back-to-back notes on the lane change pitch without a new key-on, the way a song engine ties them
+pub struct Patch { pub inst: Option<&'static Instrument>, pub pan: i8, pub echo: bool, pub adsr: Option<Adsr>, pub legato: bool }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Setup { pub duty: Option<u8>, pub volume: u8, pub patch: Option<Patch> }
 
 impl Setup {
     fn patched(self, change: impl FnOnce(&mut Patch)) -> Setup {
-        let mut patch = self.patch.unwrap_or(Patch { inst: None, pan: 0, echo: false, adsr: None });
+        let mut patch = self.patch.unwrap_or(Patch { inst: None, pan: 0, echo: false, adsr: None, legato: false });
         change(&mut patch);
         Setup { patch: Some(patch), ..self }
     }
@@ -254,7 +257,8 @@ impl Part {
             (Voice::Triangle, knob) if KNOBS.contains(&knob) => Err(Breach::Volume(key.clone())),
             (Voice::Sample, "inst") => bank::instrument(value).map(|inst| setup.patched(|p| p.inst = Some(inst))).ok_or_else(|| Breach::Instrument(value.clone())),
             (Voice::Sample, "pan") => pan(value).map(|pan| setup.patched(|p| p.pan = pan)).ok_or_else(|| Breach::Pan(value.clone())),
-            (Voice::Sample, "echo") => match value.as_str() { "on" => Ok(setup.patched(|p| p.echo = true)), "off" => Ok(setup.patched(|p| p.echo = false)), _ => Err(Breach::Echo(value.clone())) },
+            (Voice::Sample, "echo") => switch(value).map(|on| setup.patched(|p| p.echo = on)).ok_or_else(|| Breach::Switch { key: "echo", value: value.clone() }),
+            (Voice::Sample, "legato") => switch(value).map(|on| setup.patched(|p| p.legato = on)).ok_or_else(|| Breach::Switch { key: "legato", value: value.clone() }),
             (Voice::Sample, "adsr") => envelope(value).map(|adsr| setup.patched(|p| p.adsr = Some(adsr))).ok_or_else(|| Breach::Adsr(value.clone())),
             _ => Err(Breach::Param { key: key.clone(), takes: self.voice.takes() }),
         })
@@ -265,6 +269,7 @@ impl Part {
         if self.voice != Voice::Sample { return Ok(Seat { voice: self.voice, low: self.low, high: self.high, playable: self.playable, setup, inst: None }); }
         let inst = setup.patch.and_then(|p| p.inst).ok_or(Breach::Unvoiced)?;
         let voice = match inst.kind { Kind::Tone(_) => Voice::Sample, Kind::Kit(_) => Voice::Kit, Kind::Noise => Voice::Hiss };
+        if voice != Voice::Sample && setup.patch.is_some_and(|p| p.legato) { return Err(Breach::Untied(inst.name)); }
         Ok(Seat { voice, low: inst.low, high: inst.high, playable: inst.playable, setup, inst: Some(inst) })
     }
 
@@ -345,7 +350,8 @@ pub enum Breach {
     Instrument(String),
     Unvoiced,
     Pan(String),
-    Echo(String),
+    Switch { key: &'static str, value: String },
+    Untied(&'static str),
     Adsr(String),
     Drumless { at: Position, pitch: u8 },
     Clock { at: Position, clock: u8, lane: String, held: Position, holds: u8 },
@@ -371,7 +377,8 @@ impl Breach {
             Breach::Instrument(_) => "unknown-instrument",
             Breach::Unvoiced => "no-instrument",
             Breach::Pan(_) => "bad-pan",
-            Breach::Echo(_) => "bad-echo-switch",
+            Breach::Switch { .. } => "bad-switch",
+            Breach::Untied(_) => "legato-unpitched",
             Breach::Adsr(_) => "bad-adsr",
             Breach::Drumless { .. } => "no-drum",
             Breach::Clock { .. } => "noise-clock-clash",
@@ -481,7 +488,8 @@ impl fmt::Display for Breach {
             Breach::Instrument(name) => write!(f, "`{name}` isn't in the snes bank; it holds {}", instruments()),
             Breach::Unvoiced => write!(f, "a snes lane plays nothing until it loads an instrument; add `inst` and one of {}", instruments()),
             Breach::Pan(value) => write!(f, "pan `{value}` isn't a place the voice can sit; pick a whole number from -8 (left) through 0 (centre) to 8 (right)"),
-            Breach::Echo(value) => write!(f, "echo `{value}` is a switch; it's either `on` or `off`"),
+            Breach::Switch { key, value } => write!(f, "{key} `{value}` is a switch; it's either `on` or `off`"),
+            Breach::Untied(name) => write!(f, "`legato` ties one pitch into the next, and the {name} has no pitch to tie; every hit strikes on its own"),
             Breach::Adsr(value) => write!(f, "adsr `{value}` isn't an envelope the chip has; write attack,decay,sustain,release as whole numbers up to 15,7,7,31, like `15,7,7,0`"),
             Breach::Drumless { pitch, .. } => write!(f, "the kit has no drum on {}; its letters are {}", named(*pitch).trim_end_matches(|c: char| c.is_ascii_digit() || c == '-'), bank::letters()),
             Breach::Clock { clock, lane, held, holds, .. } => write!(f, "this noise wants the {} clock while lane {lane}'s noise at {held} holds the {} one; the chip has one noise clock, so noises that sound at once have to share it", hz(dsp::clock_hz(*clock)), hz(dsp::clock_hz(*holds))),
@@ -653,7 +661,7 @@ mod tests {
 
     #[test]
     fn duty_has_no_place_on_a_sample_voice() {
-        assert_eq!(snes("lane voice1 inst flute duty 50\n  1: C5 x4 duty 25\n"), ["doesn't take `duty`; it takes `inst`, `vol`, `pan`, `echo`, and `adsr`", "doesn't take `duty` on its notes; this lane's notes take `vib`, `arp`, `from`, `vol`, and `fade`"]);
+        assert_eq!(snes("lane voice1 inst flute duty 50\n  1: C5 x4 duty 25\n"), ["doesn't take `duty`; it takes `inst`, `vol`, `pan`, `echo`, `adsr`, and `legato`", "doesn't take `duty` on its notes; this lane's notes take `vib`, `arp`, `from`, `vol`, and `fade`"]);
     }
 
     #[test]
@@ -664,8 +672,10 @@ mod tests {
         assert_eq!(harp.adsr(), Some(Adsr { attack: 15, decay: 4, sustain: 5, release: 12 }));
         assert_eq!(seat(&[("inst", "harp")]).unwrap().adsr(), Some(bank::I_HARP.adsr), "without `adsr` the instrument keeps its own envelope");
         assert_eq!(seat(&[("inst", "kit")]).unwrap().voice, Voice::Kit);
+        assert_eq!(seat(&[("inst", "strings"), ("legato", "on")]).unwrap().setup.patch.map(|p| p.legato), Some(true));
+        assert_eq!(seat(&[("inst", "kit"), ("legato", "on")]).unwrap_err().to_string(), "`legato` ties one pitch into the next, and the kit has no pitch to tie; every hit strikes on its own");
         assert_eq!(seat(&[("inst", "noise")]).unwrap().voice, Voice::Hiss);
-        for (key, value) in [("pan", "9"), ("pan", "-9"), ("pan", "left"), ("echo", "yes"), ("adsr", "16,0,0,0"), ("adsr", "15,8,7,0"), ("adsr", "15,7,7"), ("vol", "16")] {
+        for (key, value) in [("pan", "9"), ("pan", "-9"), ("pan", "left"), ("echo", "yes"), ("legato", "1"), ("adsr", "16,0,0,0"), ("adsr", "15,8,7,0"), ("adsr", "15,7,7"), ("vol", "16")] {
             assert!(seat(&[("inst", "harp"), (key, value)]).is_err(), "{key} {value} should not read");
         }
         assert_eq!(Breach::Pan("9".into()).to_string(), "pan `9` isn't a place the voice can sit; pick a whole number from -8 (left) through 0 (centre) to 8 (right)");
