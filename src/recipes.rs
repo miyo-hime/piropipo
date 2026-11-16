@@ -256,9 +256,10 @@ pub fn snare() -> Made {
     drum("snare", 24_000, 0.25, |n, r| rise(n, 6) * (0.55 * decay(n, 0.05, r) * ((TAU * 185.0 * n as f64 / r).sin() + 0.5 * (TAU * 330.0 * n as f64 / r).sin()) + 0.8 * decay(n, 0.11, r) * hiss[n] / peak))
 }
 
+// a swish, not a hit: stored at the full rate so it keeps its air, swelling in over 25 ms
 pub fn brush() -> Made {
-    let hiss = noise(53, 4_480, &[('b', 3_000.0, 0.6), ('h', 600.0, 0.7)], 16_000.0);
-    drum("brush", 16_000, 0.28, |n, r| rise(n, 240) * decay(n, 0.09, r) * hiss[n])
+    let hiss = noise(53, 8_000, &[('b', 3_500.0, 0.5), ('h', 1_200.0, 0.7)], RATE);
+    drum("brush", 32_000, 0.25, |n, r| rise(n, 800) * decay(n, 0.11, r) * hiss[n])
 }
 
 pub fn rim() -> Made {

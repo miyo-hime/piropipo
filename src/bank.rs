@@ -42,7 +42,7 @@ sample!(BELL, "bell", Some(8_000), Tune::Root(500.0));
 sample!(KICK, "kick", None, Tune::Stored(16_000));
 sample!(RIM, "rim", None, Tune::Stored(32_000));
 sample!(SNARE, "snare", None, Tune::Stored(24_000));
-sample!(BRUSH, "brush", None, Tune::Stored(16_000));
+sample!(BRUSH, "brush", None, Tune::Stored(32_000));
 sample!(FRAME, "frame", None, Tune::Stored(16_000));
 sample!(TOM, "tom", None, Tune::Stored(16_000));
 sample!(HAT, "hat", None, Tune::Stored(32_000));
