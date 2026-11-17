@@ -21,7 +21,8 @@ impl Contour {
             Contour::Still(pitch) => *pitch,
             Contour::Shake { pitch, cents, hz, from } if t >= *from => pitch + cents / 100.0 * (TAU * hz * (t - from) as f64 / f64::from(RATE)).sin(),
             Contour::Shake { pitch, .. } => *pitch,
-            Contour::Steps(steps) => steps.iter().take_while(|(at, _)| *at <= t).last().map_or(steps[0].1, |s| s.1),
+            // the steps are in time order: the last one at or before t, or the first before any has come
+            Contour::Steps(steps) => steps[steps.partition_point(|(at, _)| *at <= t).saturating_sub(1)].1,
             Contour::Glide { to, land, .. } if t >= *land => *to,
             Contour::Glide { from, to, start, land } => from + (to - from) * t.saturating_sub(*start) as f64 / (land - start).max(1) as f64,
         }
@@ -29,7 +30,7 @@ impl Contour {
 
     // the samples where the pitch has to be written exactly, not on the next tick: each arp step, and where a glide lands
     fn turns(&self, t: u64) -> bool {
-        match self { Contour::Steps(steps) => steps.iter().any(|(at, _)| *at == t), Contour::Glide { land, .. } => *land == t, _ => false }
+        match self { Contour::Steps(steps) => steps.binary_search_by_key(&t, |(at, _)| *at).is_ok(), Contour::Glide { land, .. } => *land == t, _ => false }
     }
 }
 
