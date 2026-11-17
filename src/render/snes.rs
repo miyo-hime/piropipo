@@ -144,12 +144,12 @@ fn plan(song: &Song, pattern: &Pattern, held: [Option<&'static Instrument>; VOIC
     Ok(Plan { strikes, holds, len })
 }
 
-// the chip has one noise clock. at every noise key-on, any other voice the chip still has ringing (a release included) on a
-// different clock is a clash; voices keyed on the same sample count in voice order, after any that the sample struck again
+// the chip has one noise clock. at every noise key-on, any other voice the chip still has sounding (a release included, a held
+// note drained to silence not) on a different clock is a clash; voices keyed on the same sample count in voice order, after any that the sample struck again
 fn clash(chip: &Chip, voices: &[Hold; VOICES], fresh: &[bool; VOICES]) -> Result<(), RenderError> {
     for voice in (0..VOICES).filter(|&v| fresh[v]) {
         let Some((clock, at)) = voices[voice].noise else { continue };
-        let holder = (0..VOICES).filter(|&o| o != voice && (!fresh[o] || o < voice) && chip.ringing(o)).find_map(|o| voices[o].noise.filter(|n| n.0 != clock).map(|n| (o, n)));
+        let holder = (0..VOICES).filter(|&o| o != voice && (!fresh[o] || o < voice) && chip.sounding(o)).find_map(|o| voices[o].noise.filter(|n| n.0 != clock).map(|n| (o, n)));
         if let Some((other, (holds, held))) = holder {
             return Err(RenderError::Card { lane: Some(SNES.parts[voice].name.to_owned()), breach: profile::Breach::Clock { at, clock, lane: SNES.parts[other].name.to_owned(), held, holds } });
         }
@@ -381,6 +381,11 @@ mod tests {
         assert!(matches!(released, RenderError::Card { breach: profile::Breach::Clock { .. }, .. }), "{released}");
         let across = refused("song \"s\" tempo 255 profile snes\npattern p bars 1 grid 255\nlane voice1 inst noise\n  255: C7 x1\npattern q bars 1 grid 255\nlane voice2 inst noise\n  1: C2 x1\nplay\n  p\n  q\n");
         assert!(matches!(across, RenderError::Card { breach: profile::Breach::Clock { .. }, .. }), "a release that rings into the next play still holds the clock: {across}");
+        // a held noise whose sustain has drained to silence lets go of the clock, though it stays keyed on
+        let drained = song("song \"s\" tempo 120 profile snes\npattern p bars 1 grid 4\nlane voice1 inst noise adsr 15,7,0,31\n  1: C7 x4\nlane voice2 inst noise\n  2: C2 x1\n");
+        assert!(crate::render::press(&drained, &drained.patterns[0], &mut Stencils::default()).is_ok());
+        let held = refused("song \"s\" tempo 120 profile snes\npattern p bars 1 grid 4\nlane voice1 inst noise\n  1: C7 x4\nlane voice2 inst noise\n  2: C2 x1\n");
+        assert!(matches!(held, RenderError::Card { breach: profile::Breach::Clock { .. }, .. }), "one that still sounds holds it: {held}");
         let agreed = song("song \"s\" tempo 255 profile snes\npattern p bars 1 grid 255\nlane voice1 inst noise\n  1: C7 x1\nlane voice2 inst noise\n  2: C7 x1\n");
         assert!(crate::render::press(&agreed, &agreed.patterns[0], &mut Stencils::default()).is_ok());
     }

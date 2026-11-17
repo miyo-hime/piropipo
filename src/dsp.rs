@@ -216,6 +216,10 @@ impl Chip {
 
     pub fn ringing(&self, voice: usize) -> bool { self.voices[voice].rings() }
 
+    // heard, or about to be: a voice just keyed on (still at zero in its attack) or one with any envelope left. a held voice
+    // whose sustain has drained to nothing stays keyed on but makes no sound
+    pub fn sounding(&self, voice: usize) -> bool { let v = &self.voices[voice]; v.mode == Mode::Attack || (v.rings() && v.env > 0) }
+
     pub fn level(&self, voice: usize) -> u16 { self.voices[voice].env }
 
     pub fn sample(&mut self) -> [i16; 2] {
@@ -294,6 +298,18 @@ mod tests {
         held(&mut chip, 64_000);
         assert!(chip.level(0) > 0, "with the new sustain at full and no sustain release, the voice holds where it is");
         assert!(chip.voices[0].mode == Mode::Sustain);
+    }
+
+    #[test]
+    fn a_drained_sustain_is_keyed_on_but_not_sounding() {
+        let mut chip = Chip::new(0, 0, 0);
+        chip.key_on(0, Key { adsr: Adsr { attack: 15, decay: 7, sustain: 0, release: 31 }, ..key(0x1000) });
+        assert!(chip.sounding(0), "a voice just keyed on counts before its attack rises");
+        held(&mut chip, 2_000);
+        assert!(chip.ringing(0) && !chip.sounding(0));
+        chip.key_off(0);
+        held(&mut chip, 1);
+        assert!(!chip.ringing(0));
     }
 
     #[test]
