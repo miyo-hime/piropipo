@@ -105,9 +105,9 @@ tone!(I_ORGAN, "organ", ORGAN, adsr(12, 7, 7, 0), 36, 95, "C2 through B6 on the 
 tone!(I_BASS, "bass", BASS, adsr(15, 2, 5, 11), 24, 60, "C1 through C4 on the bass");
 tone!(I_BELL, "bell", BELL, adsr(15, 7, 7, 10), 43, 84, "G2 through C6 on the bell");
 
-pub static I_KIT: Instrument = Instrument { name: "kit", kind: Kind::Kit(&KIT), adsr: STRUCK, low: 0, high: 127, playable: "any pitch; its letter picks the drum" };
+pub static I_KIT: Instrument = Instrument { name: "kit", kind: Kind::Kit(&KIT), adsr: STRUCK, low: 0, high: u8::MAX, playable: "any pitch; its letter picks the drum" };
 
-pub static I_NOISE: Instrument = Instrument { name: "noise", kind: Kind::Noise, adsr: adsr(15, 7, 7, 0), low: 0, high: 127, playable: "any pitch; it picks the nearest of the chip's 31 noise clocks" };
+pub static I_NOISE: Instrument = Instrument { name: "noise", kind: Kind::Noise, adsr: adsr(15, 7, 7, 0), low: 0, high: u8::MAX, playable: "any pitch; it picks the nearest of the chip's 31 noise clocks" };
 
 pub static BANK: [&Instrument; 14] = [&I_FLUTE, &I_OCARINA, &I_HARP, &I_PIZZ, &I_MUSICBOX, &I_EPIANO, &I_STRINGS, &I_ACCORDION, &I_CHOIR, &I_ORGAN, &I_BASS, &I_BELL, &I_KIT, &I_NOISE];
 

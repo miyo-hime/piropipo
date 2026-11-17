@@ -156,6 +156,7 @@ pub fn vet(song: &Song, pattern: &Pattern) -> Result<(), RenderError> {
             timing(song.tempo, staff, note.at.tick(pattern.grid) * staff.unit, note, pitch).map_err(|flaw| RenderError::Ornament { lane: lane.name.clone(), at: note.at, flaw, played: None })?;
         }
     }
+    if card.engine == Engine::Sdsp { snes::vet(song, pattern)?; }
     Ok(())
 }
 
@@ -164,7 +165,9 @@ pub fn transposed<'p>(song: &Song, pattern: &'p Pattern, cue: &Cue) -> Result<Co
     let card = profile::card(song.profile.as_deref()).map_err(|breach| charged("", breach))?;
     let mut moved = pattern.clone();
     for lane in &mut moved.lanes {
-        let Ok(seat) = card.part(&lane.name).and_then(|part| part.seat(&lane.params)) else { continue };
+        let Ok(part) = card.part(&lane.name) else { continue };
+        // the nes four sound the same whatever their params say, so a bad param doesn't keep their notes from being moved and judged
+        let seat = match part.seat(&lane.params) { Ok(seat) => seat, Err(_) if part.voice != Voice::Sample => part.seat(&[]).expect("the nes four take no required params"), Err(_) => continue };
         if !seat.voice.pitched() { continue; }
         for note in &mut lane.notes {
             let Some(pitch) = note.pitch else { continue };

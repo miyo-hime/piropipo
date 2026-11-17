@@ -653,6 +653,7 @@ mod tests {
     #[test]
     fn the_kit_reads_letters_and_refuses_to_bend() {
         assert_eq!(snes("lane voice8 inst kit\n  1: C2 x1\n  2: D9 x1\n  3: G#4 x1 vol 4 fade\n"), Vec::<String>::new());
+        assert_eq!(snes("lane voice8 inst kit\n  1: A9 x1\nlane voice7 inst noise\n  1: B9 x1\n"), Vec::<String>::new(), "the kit and the noise take every pitch the grid can write");
         assert_eq!(snes("lane voice8 inst kit\n  1: A#4 x1\n"), ["the kit has no drum on A#; its letters are C kick, C# rim, D snare, D# brush, E frame, F tom, F# hat, G shaker, G# bells, A ting"]);
         let kit = "`{}` doesn't play on a kit lane; its letters pick drums, and every drum plays at the rate it was stored";
         assert_eq!(snes("lane voice8 inst kit\n  1: D4 x2 vib 20ct 5hz\n  3: E4 x2 from D4\n"), [kit.replace("{}", "vib"), kit.replace("{}", "from")]);

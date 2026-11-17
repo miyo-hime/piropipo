@@ -62,24 +62,31 @@ impl Adsr {
         ticks * f64::from(PERIODS[rate]) / f64::from(RATE)
     }
 
-    // seconds from full down to the sustain level, and from there to silence while the key is held; None is forever
-    pub fn decay_seconds(self) -> f64 { f64::from(fall(0x7FF, u16::from(self.sustain) << 8)) * f64::from(PERIODS[usize::from(self.decay) * 2 + 16]) / f64::from(RATE) }
+    // seconds from full down into the sustain level, and from there to silence while the key is held; None is forever.
+    // both walk the envelope the way the voice does, step by step, so they agree with it exactly
+    pub fn decay_seconds(self) -> f64 { f64::from(decay(self.sustain).0) * f64::from(PERIODS[usize::from(self.decay) * 2 + 16]) / f64::from(RATE) }
 
     pub fn sustain_seconds(self) -> Option<f64> {
         let period = PERIODS[usize::from(self.release)];
-        (period > 0).then(|| f64::from(fall((u16::from(self.sustain) + 1) << 8, 0)) * f64::from(period) / f64::from(RATE))
+        (period > 0).then(|| f64::from(drain(decay(self.sustain).1)) * f64::from(period) / f64::from(RATE))
     }
 
     pub fn level(self) -> f64 { f64::from(self.sustain + 1) / 8.0 }
 }
 
-// ticks of the exponential fall from one envelope level down to (or under) another
-fn fall(from: u16, to: u16) -> u32 {
-    let (mut env, mut ticks) = (from.min(0x7FF), 0);
-    while env >> 8 > to >> 8 || (to == 0 && env > 0) {
-        env -= ((env - 1) >> 8) + 1;
-        ticks += 1;
-    }
+fn step(env: u16) -> u16 { env - (((env - 1) >> 8) + 1) }
+
+// ticks of the decay from full until the envelope enters the sustain level's band, and the level it enters at
+fn decay(sustain: u8) -> (u32, u16) {
+    let (mut env, mut ticks) = (0x7FF, 0);
+    while env >> 8 != u16::from(sustain.min(7)) { env = step(env); ticks += 1; }
+    (ticks, env)
+}
+
+// ticks of the sustain's fall from a level to silence
+fn drain(from: u16) -> u32 {
+    let (mut env, mut ticks) = (from, 0);
+    while env > 0 { env = step(env); ticks += 1; }
     ticks
 }
 
@@ -200,6 +207,8 @@ impl Chip {
 
     pub fn pitch(&mut self, voice: usize, pitch: u16) { self.voices[voice].pitch = pitch.min(FULL_PITCH); }
 
+    pub fn route(&mut self, voice: usize, echo: bool, adsr: Adsr) { let v = &mut self.voices[voice]; v.echo = echo; v.adsr = adsr; }
+
     pub fn volume(&mut self, voice: usize, volume: [i32; 2]) { self.voices[voice].volume = volume; }
 
     pub fn noise_clock(&mut self, clock: u8) { self.clock = clock.min(31); }
@@ -272,6 +281,20 @@ mod tests {
     }
 
     fn held(chip: &mut Chip, n: usize) -> Vec<[i16; 2]> { (0..n).map(|_| chip.sample()).collect() }
+
+    #[test]
+    fn the_envelope_times_are_the_voice_s_own() {
+        for adsr in [Adsr { attack: 15, decay: 7, sustain: 0, release: 31 }, Adsr { attack: 13, decay: 4, sustain: 3, release: 22 }, Adsr { attack: 15, decay: 2, sustain: 5, release: 11 }] {
+            let mut chip = Chip::new(0, 0, 0);
+            chip.key_on(0, Key { adsr, ..key(0x1000) });
+            // a sustain that drains to zero leaves the voice keyed on and silent, as the chip does: count to the silence
+            let (mut samples, mut risen) = (0u32, false);
+            while (!risen || chip.level(0) > 0) && samples < 32_000 * 30 { chip.sample(); samples += 1; risen |= chip.level(0) > 0; }
+            let predicted = (adsr.attack_seconds() + adsr.decay_seconds() + adsr.sustain_seconds().unwrap()) * f64::from(RATE);
+            let slack = f64::from(PERIODS[usize::from(adsr.attack) * 2 + 1] + PERIODS[usize::from(adsr.decay) * 2 + 16] + PERIODS[usize::from(adsr.release)]) * 2.0;
+            assert!((f64::from(samples) - predicted).abs() <= slack, "{adsr:?}: the voice lasts {samples} samples, the estimate says {predicted:.0}");
+        }
+    }
 
     static SQUARE: [i16; 32] = [12_000, 12_000, 12_000, 12_000, 12_000, 12_000, 12_000, 12_000, 12_000, 12_000, 12_000, 12_000, 12_000, 12_000, 12_000, 12_000, -12_000, -12_000, -12_000, -12_000, -12_000, -12_000, -12_000, -12_000, -12_000, -12_000, -12_000, -12_000, -12_000, -12_000, -12_000, -12_000];
 
