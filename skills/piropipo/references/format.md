@@ -311,7 +311,12 @@ and checks it byte for byte.
   however many lanes load it), each drum the kit actually strikes, the echo buffer (2 kb
   per 16 ms of delay), and 8 kb for the driver and the song. over that is an error naming
   every item and its size; check reports the spend either way.
-- **one noise clock.** two noise lanes sounding at once must ask for the same clock.
+- **one noise clock.** two noises sounding at once must ask for the same clock. for music
+  that plays, check asks the chip itself: a release that rings past a short note's end
+  counts, across plays too, and a voice struck again cuts its own. a pattern that never
+  plays is held to its written notes.
+- **legato-fades** (a warning): the chip played a tied note as silence, because the
+  instrument's envelope ran out partway through the chain. it names the note that goes quiet.
 
 the report grows a `chip` block: the sound ram spend, the echo, and the **tail** - how
 long the chip keeps ringing after the last sample of the file. a song that ends while the

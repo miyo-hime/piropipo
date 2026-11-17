@@ -242,22 +242,6 @@ impl Chip {
     }
 }
 
-// when a held envelope reaches silence, in samples from its key-on, walking each stretch with its own adsr the way a voice
-// does when a legato tie changes its envelope; None if it never does within the stretches
-pub fn silent_after(stretches: &[(Adsr, u64)]) -> Option<u64> {
-    let mut voice = Voice { mode: Mode::Attack, adsr: stretches.first()?.0, ..Voice::default() };
-    let (mut t, mut risen) = (0, false);
-    for &(adsr, samples) in stretches {
-        voice.adsr = adsr;
-        for _ in 0..samples {
-            voice.envelope();
-            t += 1;
-            if voice.env > 0 { risen = true; } else if risen { return Some(t); }
-        }
-    }
-    None
-}
-
 // the noise clock nearest a frequency, among the 31 that tick
 pub fn nearest_clock(hz: f64) -> u8 {
     (1..32u8).min_by(|a, b| {
@@ -308,8 +292,6 @@ mod tests {
         chip.route(0, false, Adsr { attack: 15, decay: 0, sustain: 7, release: 0 });
         held(&mut chip, 64_000);
         assert!(chip.level(0) > 0, "with the new sustain at full and no sustain release, the voice holds where it is");
-        assert_eq!(silent_after(&[(Adsr { attack: 15, decay: 7, sustain: 0, release: 31 }, 1_000_000)]), Some(1_137));
-        assert_eq!(silent_after(&[(Adsr { attack: 15, decay: 7, sustain: 7, release: 0 }, 100_000)]), None);
     }
 
     #[test]

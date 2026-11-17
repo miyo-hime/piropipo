@@ -105,7 +105,14 @@ pub struct Stencils { vibratos: Vec<[u8; 3]>, fades: Vec<Vec<u8>>, stage: Option
 impl Stencils {
     // how long the chip keeps sounding after the last play, and how loud that tail starts; None on a card with no tails
     pub fn tail(&self) -> Option<Tail> { self.stage.as_ref().map(snes::tail) }
+
+    // the tied notes the chip heard go silent, in the order it heard them; none on a card with no envelopes
+    pub fn silences(&self) -> &[Silence] { self.stage.as_ref().map_or(&[], |s| s.silences()) }
 }
+
+// a legato note the chip played as silence: its voice's envelope had faded to nothing by or during it
+#[derive(Debug, Clone, PartialEq)]
+pub struct Silence { pub pattern: String, pub lane: &'static str, pub at: Position, pub line: usize, pub inst: &'static str }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tail { pub ms: f64, pub peak: i16 }
@@ -156,7 +163,6 @@ pub fn vet(song: &Song, pattern: &Pattern) -> Result<(), RenderError> {
             timing(song.tempo, staff, note.at.tick(pattern.grid) * staff.unit, note, pitch).map_err(|flaw| RenderError::Ornament { lane: lane.name.clone(), at: note.at, flaw, played: None })?;
         }
     }
-    if card.engine == Engine::Sdsp { snes::vet(song, pattern)?; }
     Ok(())
 }
 
