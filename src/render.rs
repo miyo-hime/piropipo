@@ -1,4 +1,4 @@
-use crate::profile::{self, Breach, Flaw, Part, Setup, Voice, named};
+use crate::profile::{self, Breach, Engine, Flaw, Part, Setup, Voice, named};
 use crate::score::{Bend, Cue, MOST_BEATS, Note, Ornaments, Pattern, Position, Song};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -7,6 +7,8 @@ use std::fmt;
 pub const SAMPLE_RATE: u16 = 44100;
 
 const FRAME: u64 = SAMPLE_RATE as u64 / 60;
+
+mod snes;
 
 const STENCILS: usize = 128;
 
@@ -22,6 +24,7 @@ impl Voice {
             Voice::Pulse => (octave, SPELLING[class]),
             Voice::Triangle => (octave + 1, SPELLING[class]),
             Voice::Noise => (4, SPELLING[11 - class]),
+            Voice::Sample | Voice::Kit | Voice::Hiss => return None,
         };
         match octave {
             2..=7 => Some((octave, letter.into())),
@@ -40,7 +43,7 @@ pub enum RenderError {
     Grid(u32),
     Beats(u32),
     Meter { beats: u32, grid: u32 },
-    Lane(String),
+    Lane { lane: String, card: &'static str },
     Param { lane: String, key: String, takes: &'static [&'static str] },
     Volume { lane: String, key: String },
     Duty { lane: String, value: String },
@@ -50,6 +53,7 @@ pub enum RenderError {
     Ornament { lane: String, at: Position, flaw: Flaw, played: Option<(i8, usize)> },
     Misfit { lane: String, at: Position },
     Mml(String),
+    Card { lane: Option<String>, breach: Breach },
 }
 
 impl fmt::Display for RenderError {
@@ -60,7 +64,7 @@ impl fmt::Display for RenderError {
             RenderError::Grid(grid) => write!(f, "grid {grid} is out of the renderer's reach; keep it between 1 and 255 slots per bar"),
             RenderError::Beats(beats) => write!(f, "beats {beats} is out of the renderer's reach; keep it between 1 and {MOST_BEATS} beats per bar"),
             RenderError::Meter { beats, grid } => write!(f, "grid {grid} at beats {beats} is out of the renderer's reach; its note lengths can't split a {beats}-beat bar into {grid} equal slots, and the finest grid under {grid} that can is {}", (1..*grid).rev().find(|g| staff(*beats, *g).is_ok()).unwrap_or(1)),
-            RenderError::Lane(lane) => write!(f, "{}", Breach::Lane(lane.clone())),
+            RenderError::Lane { lane, card } => write!(f, "{}", Breach::Lane { lane: lane.clone(), card }),
             RenderError::Param { lane, key, takes } => write!(f, "lane {lane}: {}", Breach::Param { key: key.clone(), takes }),
             RenderError::Volume { lane, key } => write!(f, "lane {lane}: {}", Breach::Volume(key.clone())),
             RenderError::Duty { lane, value } => write!(f, "lane {lane}: {}", Breach::Duty(value.clone())),
@@ -71,6 +75,8 @@ impl fmt::Display for RenderError {
             RenderError::Ornament { lane, at, flaw, played: Some((shift, cue)) } => write!(f, "lane {lane}, at {at}: played {shift:+} (play line {cue}), {flaw}"),
             RenderError::Misfit { lane, at } => write!(f, "lane {lane}, at {at}: this note doesn't fit the pattern (an overlap, a zero length, or a spot outside it); the parser's checks would have refused it"),
             RenderError::Mml(why) => write!(f, "ffmml refused the compiled score, which is a renderer bug:\n{why}"),
+            RenderError::Card { lane: None, breach } => write!(f, "{breach}"),
+            RenderError::Card { lane: Some(lane), breach } => match breach.at() { Some(at) => write!(f, "lane {lane}, at {at}: {breach}"), None => write!(f, "lane {lane}: {breach}") },
         }
     }
 }
@@ -81,18 +87,52 @@ fn charged(lane: &str, breach: Breach) -> RenderError {
     let lane = lane.to_owned();
     match breach {
         Breach::Profile(name) => RenderError::Profile(name),
-        Breach::Lane(name) => RenderError::Lane(name),
+        Breach::Lane { lane, card } => RenderError::Lane { lane, card },
         Breach::Param { key, takes } => RenderError::Param { lane, key, takes },
         Breach::Volume(key) => RenderError::Volume { lane, key },
         Breach::Duty(value) => RenderError::Duty { lane, value },
         Breach::Loudness(value) => RenderError::Loudness { lane, value },
         Breach::Range { at, pitch, playable } => RenderError::Range { lane, at, pitch, playable },
         Breach::Ornament { at, flaw } => RenderError::Ornament { lane, at, flaw, played: None },
+        breach => RenderError::Card { lane: Some(lane).filter(|l| !l.is_empty()), breach },
     }
 }
 
-#[derive(Debug, Default)]
-pub struct Stencils { vibratos: Vec<[u8; 3]>, fades: Vec<Vec<u8>> }
+// what one song carries from play to play: the nes card's macro books, and the snes chip itself, echo and tails and all
+#[derive(Debug, Clone, Default)]
+pub struct Stencils { vibratos: Vec<[u8; 3]>, fades: Vec<Vec<u8>>, stage: Option<snes::Stage> }
+
+impl Stencils {
+    // how long the chip keeps sounding after the last play, and how loud that tail starts; None on a card with no tails
+    pub fn tail(&self) -> Option<Tail> { self.stage.as_ref().map(snes::tail) }
+
+    // the tied notes the chip heard go silent, in the order it heard them; none on a card with no envelopes
+    pub fn silences(&self) -> &[Silence] { self.stage.as_ref().map_or(&[], |s| s.silences()) }
+}
+
+// a legato note the chip played as silence: its voice's envelope had faded to nothing by or during it
+#[derive(Debug, Clone, PartialEq)]
+pub struct Silence { pub pattern: String, pub lane: &'static str, pub at: Position, pub line: usize, pub inst: &'static str }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tail { pub ms: f64, pub peak: i16 }
+
+// a play as heard: one channel, or on the snes both, with `mono` their average so the ears keep one signal to measure
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pressed { pub mono: Vec<i16>, pub stereo: Option<Vec<[i16; 2]>> }
+
+pub fn sample_rate(song: &Song) -> u32 { profile::card(song.profile.as_deref()).map_or(u32::from(SAMPLE_RATE), |c| c.rate) }
+
+pub fn press(song: &Song, pattern: &Pattern, stencils: &mut Stencils) -> Result<Pressed, RenderError> {
+    let card = profile::card(song.profile.as_deref()).map_err(|breach| charged("", breach))?;
+    match card.engine {
+        Engine::Famicom => Ok(Pressed { mono: perform(&engrave(song, pattern, stencils)?)?, stereo: None }),
+        Engine::Sdsp => {
+            let stereo = snes::press(song, pattern, &mut stencils.stage)?;
+            Ok(Pressed { mono: stereo.iter().map(|[l, r]| ((i32::from(*l) + i32::from(*r)) / 2) as i16).collect(), stereo: Some(stereo) })
+        }
+    }
+}
 
 type Plate = BTreeMap<(&'static str, usize), String>;
 
@@ -109,16 +149,16 @@ fn etch(stencils: &mut Stencils, plate: &mut Plate, fade: Vec<u8>) -> Option<Str
     Some(format!("@v{n}"))
 }
 
-pub fn pattern(song: &Song, pattern: &Pattern) -> Result<Vec<i16>, RenderError> { perform(&transcribe(song, pattern)?) }
+pub fn pattern(song: &Song, pattern: &Pattern) -> Result<Vec<i16>, RenderError> { press(song, pattern, &mut Stencils::default()).map(|p| p.mono) }
 
-pub fn pattern_with(song: &Song, pattern: &Pattern, stencils: &mut Stencils) -> Result<Vec<i16>, RenderError> { perform(&engrave(song, pattern, stencils)?) }
+pub fn pattern_with(song: &Song, pattern: &Pattern, stencils: &mut Stencils) -> Result<Vec<i16>, RenderError> { press(song, pattern, stencils).map(|p| p.mono) }
 
 pub fn vet(song: &Song, pattern: &Pattern) -> Result<(), RenderError> {
     let card = profile::card(song.profile.as_deref()).map_err(|breach| charged("", breach))?;
     let (true, Ok(staff)) = ((1..=255).contains(&song.tempo), staff(pattern.beats, pattern.grid)) else { return Ok(()) };
     for lane in &pattern.lanes {
-        let Ok(part) = card.part(&lane.name) else { continue };
-        for note in lane.notes.iter().filter(|n| part.plays(n).is_ok()) {
+        let Ok(seat) = card.part(&lane.name).and_then(|part| part.seat(&lane.params)) else { continue };
+        for note in lane.notes.iter().filter(|n| seat.plays(n).is_ok()) {
             let Some(pitch) = note.pitch else { continue };
             timing(song.tempo, staff, note.at.tick(pattern.grid) * staff.unit, note, pitch).map_err(|flaw| RenderError::Ornament { lane: lane.name.clone(), at: note.at, flaw, played: None })?;
         }
@@ -132,18 +172,20 @@ pub fn transposed<'p>(song: &Song, pattern: &'p Pattern, cue: &Cue) -> Result<Co
     let mut moved = pattern.clone();
     for lane in &mut moved.lanes {
         let Ok(part) = card.part(&lane.name) else { continue };
-        if part.voice == Voice::Noise { continue; }
+        // the nes four sound the same whatever their params say, so a bad param doesn't keep their notes from being moved and judged
+        let seat = match part.seat(&lane.params) { Ok(seat) => seat, Err(_) if part.voice != Voice::Sample => part.seat(&[]).expect("the nes four take no required params"), Err(_) => continue };
+        if !seat.voice.pitched() { continue; }
         for note in &mut lane.notes {
             let Some(pitch) = note.pitch else { continue };
             let at = note.at;
-            let landed = u8::try_from(i16::from(pitch) + i16::from(cue.shift)).ok().filter(|p| (part.low..=part.high).contains(p));
-            note.pitch = Some(landed.ok_or_else(|| RenderError::Shifted { lane: lane.name.clone(), at, pitch, shift: cue.shift, cue: cue.line, playable: part.playable })?);
+            let landed = u8::try_from(i16::from(pitch) + i16::from(cue.shift)).ok().filter(|p| (seat.low..=seat.high).contains(p));
+            note.pitch = Some(landed.ok_or_else(|| RenderError::Shifted { lane: lane.name.clone(), at, pitch, shift: cue.shift, cue: cue.line, playable: seat.playable })?);
             let snag = |flaw| RenderError::Ornament { lane: lane.name.clone(), at, flaw, played: Some((cue.shift, cue.line)) };
             if let Some(Bend::Slide(from)) = &mut note.ornaments.bend {
                 let departs = i16::from(*from) + i16::from(cue.shift);
-                *from = u8::try_from(departs).map_err(|_| snag(Flaw::Reach { offset: None, pitch, landed: departs, playable: part.playable }))?;
+                *from = u8::try_from(departs).map_err(|_| snag(Flaw::Reach { offset: None, pitch, landed: departs, playable: seat.playable }))?;
             }
-            if let Err(Breach::Ornament { flaw, .. }) = part.plays(note) { return Err(snag(flaw)); }
+            if let Err(Breach::Ornament { flaw, .. }) = seat.plays(note) { return Err(snag(flaw)); }
         }
     }
     Ok(Cow::Owned(moved))
@@ -156,9 +198,9 @@ pub fn arp_rate(tempo: u32, pattern: &Pattern, len: u32) -> Option<(u64, f64)> {
     Some((count, rate(tempo, staff.grid, units, count)))
 }
 
-pub fn sample_in(tempo: u32, pattern: &Pattern, slots: u64) -> Option<u64> {
+pub fn sample_in(rate: u32, tempo: u32, pattern: &Pattern, slots: u64) -> Option<u64> {
     let staff = staff(pattern.beats, pattern.grid).ok().filter(|_| (1..=255).contains(&tempo))?;
-    u64::try_from(sample_at(tempo, staff.grid, slots.checked_mul(staff.unit)?)).ok()
+    u64::try_from(clock_at(rate, tempo, staff.grid, slots.checked_mul(staff.unit)?)).ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +223,7 @@ fn staff(beats: u32, grid: u32) -> Result<Staff, RenderError> {
 
 fn gcd(a: u32, b: u32) -> u32 { if b == 0 { a } else { gcd(b, a % b) } }
 
+#[cfg(test)]
 fn transcribe(song: &Song, pattern: &Pattern) -> Result<String, RenderError> { engrave(song, pattern, &mut Stencils::default()) }
 
 fn engrave(song: &Song, pattern: &Pattern, stencils: &mut Stencils) -> Result<String, RenderError> {
@@ -198,7 +241,7 @@ fn line(tempo: u32, pattern: &Pattern, staff: Staff, part: &Part, stencils: &mut
     let Pattern { bars, grid, .. } = *pattern;
     let span = u64::from(bars) * u64::from(grid) * staff.unit;
     let lane = pattern.lanes.iter().find(|l| l.name == name);
-    let Setup { duty, volume } = part.setup(lane.map_or(&[][..], |l| l.params.as_slice())).map_err(|breach| charged(name, breach))?;
+    let Setup { duty, volume, .. } = part.setup(lane.map_or(&[][..], |l| l.params.as_slice())).map_err(|breach| charged(name, breach))?;
     // a triangle that rests before its first note idles at full positive output in ffmml (a DC shelf), so every voice starts at v0 and finds its volume on its first note
     let mut words = vec![channel.to_string(), format!("t{tempo}"), "v0".to_owned()];
     if let Some(timbre) = duty { words.push(format!("@{timbre}")); }
@@ -276,7 +319,9 @@ fn tie(letter: &str, grid: u32, slots: u64) -> String { lengths(grid, slots).map
 
 fn seconds(tempo: u32, grid: u32, slots: u64) -> f64 { slots as f64 * 240.0 / (f64::from(tempo) * f64::from(grid)) }
 
-fn sample_at(tempo: u32, grid: u32, tick: u64) -> u128 { (u128::from(tick) * 240 * u128::from(SAMPLE_RATE)).div_ceil(u128::from(tempo) * u128::from(grid)) }
+fn sample_at(tempo: u32, grid: u32, tick: u64) -> u128 { clock_at(u32::from(SAMPLE_RATE), tempo, grid, tick) }
+
+fn clock_at(rate: u32, tempo: u32, grid: u32, tick: u64) -> u128 { (u128::from(tick) * 240 * u128::from(rate)).div_ceil(u128::from(tempo) * u128::from(grid)) }
 
 fn frames(tempo: u32, grid: u32, start: u64, end: u64) -> u64 { u64::try_from((sample_at(tempo, grid, end) - sample_at(tempo, grid, start)).div_ceil(u128::from(FRAME))).unwrap_or(u64::MAX) }
 
@@ -562,7 +607,7 @@ mod tests {
         let refusal = |head: &str, lane: &str| render(&format!("{head}\npattern p bars 1 grid 4\n{lane}\n  1: C4 x1\n")).unwrap_err();
         assert_eq!(refusal("song \"s\" tempo 90 profile gameboy", "lane pulse1"), RenderError::Profile("gameboy".into()));
         assert_eq!(refusal("song \"s\" tempo 300", "lane pulse1"), RenderError::Tempo(300));
-        assert_eq!(refusal("song \"s\" tempo 90", "lane bass"), RenderError::Lane("bass".into()));
+        assert_eq!(refusal("song \"s\" tempo 90", "lane bass"), RenderError::Lane { lane: "bass".into(), card: "nes" });
         assert_eq!(refusal("song \"s\" tempo 90", "lane pulse1 duty 33"), RenderError::Duty { lane: "pulse1".into(), value: "33".into() });
         assert_eq!(refusal("song \"s\" tempo 90", "lane pulse1 volume 15").to_string(), "lane pulse1: doesn't take `volume`; it takes `duty` and `vol`");
         assert_eq!(refusal("song \"s\" tempo 90", "lane triangle duty 50").to_string(), "lane triangle: doesn't take `duty`; it takes no parameters");

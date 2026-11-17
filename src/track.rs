@@ -1,6 +1,5 @@
 use crate::listen::{self, Detail, Remark, Take};
 use crate::surface;
-use piropipo::render::SAMPLE_RATE;
 use std::path::{Path, PathBuf};
 
 #[derive(clap::Args)]
@@ -9,6 +8,8 @@ pub struct Args {
     pub input: String,
     #[arg(short, long, help = "where the wav lands (default: beside the input)")]
     pub output: Option<PathBuf>,
+    #[arg(long = "loop", help = "render for a game that loops the song: what rings past the end (the snes echo) already sounds at the start")]
+    pub looped: bool,
 }
 
 pub fn run(args: Args, human: bool) -> Result<(), Box<dyn std::error::Error>> { listen::answer("track", human, Detail::Deposition, press(args)) }
@@ -16,13 +17,14 @@ pub fn run(args: Args, human: bool) -> Result<(), Box<dyn std::error::Error>> { 
 fn press(args: Args) -> Result<(Option<PathBuf>, Take), Vec<Remark>> {
     let origin = (args.input != "-").then(|| Path::new(&args.input));
     let dest = surface::land_beside(origin, args.output, "wav").map_err(|(code, why)| vec![Remark::loose(code, why)])?;
-    let take = listen::take(&listen::read(&args.input)?)?;
-    publish(&dest, &take.samples).map_err(|e| vec![Remark::loose("unwritable-output", format!("can't write {}: {e}", dest.display()))])?;
+    let take = listen::take_looped(&listen::read(&args.input)?, args.looped)?;
+    let (samples, channels) = take.stereo.as_ref().map_or((take.samples.as_slice(), 1), |s| (s.as_flattened(), 2));
+    publish(&dest, samples, channels, take.rate).map_err(|e| vec![Remark::loose("unwritable-output", format!("can't write {}: {e}", dest.display()))])?;
     Ok((Some(dest), take))
 }
 
-fn publish(dest: &Path, samples: &[i16]) -> std::io::Result<()> {
-    surface::publish(dest, &surface::pressed(samples, u32::from(SAMPLE_RATE)).map_err(std::io::Error::other)?)
+fn publish(dest: &Path, samples: &[i16], channels: u16, rate: u32) -> std::io::Result<()> {
+    surface::publish(dest, &surface::pressed_with(samples, channels, rate).map_err(std::io::Error::other)?)
 }
 
 #[cfg(test)]
@@ -37,7 +39,7 @@ mod tests {
 
     #[test]
     fn stdin_without_o_is_refused_before_reading_anything() {
-        let Err(errors) = press(Args { input: "-".into(), output: None }) else { panic!("stdin with no -o should refuse") };
+        let Err(errors) = press(Args { input: "-".into(), output: None, looped: false }) else { panic!("stdin with no -o should refuse") };
         assert_eq!(errors.iter().map(|e| e.code).collect::<Vec<_>>(), ["no-output"]);
     }
 
@@ -46,7 +48,7 @@ mod tests {
         let dir = scratch("beside");
         let score = dir.join("ding.piro");
         std::fs::write(&score, "song \"ding\" tempo 120\npattern p bars 1 grid 4\nlane pulse1\n  1: C5 x2\n").unwrap();
-        let (output, take) = press(Args { input: score.to_string_lossy().into(), output: None }).unwrap_or_else(|e| panic!("{e:?}"));
+        let (output, take) = press(Args { input: score.to_string_lossy().into(), output: None, looped: false }).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(output.as_deref(), Some(dir.join("ding.wav").as_path()));
         let read: Vec<i16> = hound::WavReader::open(dir.join("ding.wav")).unwrap().into_samples().map(Result::unwrap).collect();
         assert_eq!(read, take.samples);
@@ -60,7 +62,7 @@ mod tests {
         let score = dir.join("ding.piro");
         std::fs::write(dir.join("ding.wav"), b"the last good take").unwrap();
         std::fs::write(&score, "song \"ding\" tempo 120\npattern p bars 1 grid 4\nlane pulse1\n  1: C5 x9\n").unwrap();
-        let Err(errors) = press(Args { input: score.to_string_lossy().into(), output: None }) else { panic!("x9 runs past a 4-slot pattern") };
+        let Err(errors) = press(Args { input: score.to_string_lossy().into(), output: None, looped: false }) else { panic!("x9 runs past a 4-slot pattern") };
         assert_eq!(errors[0].code, "runs-past-end");
         assert_eq!(std::fs::read(dir.join("ding.wav")).unwrap(), b"the last good take");
         std::fs::remove_dir_all(dir).unwrap();
@@ -71,7 +73,7 @@ mod tests {
         let dir = scratch("self");
         let score = dir.join("ding.piro");
         std::fs::write(&score, "song \"ding\" tempo 120\n").unwrap();
-        let Err(errors) = press(Args { input: score.to_string_lossy().into(), output: Some(score.clone()) }) else { panic!("-o onto the input should refuse") };
+        let Err(errors) = press(Args { input: score.to_string_lossy().into(), output: Some(score.clone()), looped: false }) else { panic!("-o onto the input should refuse") };
         assert_eq!(errors[0].code, "output-eats-input");
         assert_eq!(std::fs::read_to_string(&score).unwrap(), "song \"ding\" tempo 120\n");
         std::fs::remove_dir_all(dir).unwrap();
@@ -80,8 +82,8 @@ mod tests {
     #[test]
     fn a_failed_publish_leaves_no_draft() {
         let dir = scratch("nowhere");
-        assert!(publish(&dir.join("missing").join("x.wav"), &[1, 2, 3]).is_err());
-        assert!(publish(&dir, &[1, 2, 3]).is_err());
+        assert!(publish(&dir.join("missing").join("x.wav"), &[1, 2, 3], 1, 44_100).is_err());
+        assert!(publish(&dir, &[1, 2, 3], 1, 44_100).is_err());
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
         std::fs::remove_dir_all(dir).unwrap();
     }

@@ -64,7 +64,7 @@ pub struct Pattern { pub name: String, pub bars: u32, pub beats: u32, pub grid: 
 pub struct Cue { pub pattern: String, pub shift: i8, pub line: usize }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Song { pub title: String, pub tempo: u32, pub profile: Option<String>, pub patterns: Vec<Pattern>, pub setlist: Vec<Cue> }
+pub struct Song { pub title: String, pub tempo: u32, pub profile: Option<String>, pub echo: Vec<(String, String)>, pub patterns: Vec<Pattern>, pub setlist: Vec<Cue> }
 
 impl Song {
     pub fn parse(text: &str) -> Result<Song, Vec<ScoreError>> {
@@ -274,7 +274,7 @@ fn gloss(key: &str) -> &'static str {
 #[derive(Default)]
 enum Pen { #[default] Lifted, Writing, Dry }
 
-struct Head { line: usize, title: String, tempo: u32, profile: Option<String> }
+struct Head { line: usize, title: String, tempo: u32, profile: Option<String>, echo: Vec<(String, String)> }
 
 struct Sheet { pattern: Pattern, sound: bool }
 
@@ -316,10 +316,12 @@ impl Copyist {
         };
         let tokens: Vec<&str> = tail.split_whitespace().collect();
         let mut faults = Vec::new();
-        let [tempo, profile] = fields("song", &tokens, &["tempo", "profile"], &mut faults);
+        let [tempo, profile, delay, feedback, wet] = fields("song", &tokens, &["tempo", "profile", "echo", "feedback", "wet"], &mut faults);
         let tempo = required("song", "tempo", tempo, &mut faults);
         for fault in faults { self.blame_song(line, fault); }
-        self.head = Some(Head { line, title, tempo: tempo.unwrap_or(0), profile: profile.map(Into::into) });
+        // the echo is the card's to read: nes refuses it, snes steps it to the chip's 16 ms
+        let echo = [("echo", delay), ("feedback", feedback), ("wet", wet)].into_iter().filter_map(|(k, v)| Some((k.to_owned(), v?.to_owned()))).collect();
+        self.head = Some(Head { line, title, tempo: tempo.unwrap_or(0), profile: profile.map(Into::into), echo });
     }
 
     fn pattern(&mut self, line: usize, rest: &str) {
@@ -431,7 +433,7 @@ impl Copyist {
         if self.head.is_none() { self.errors.push(ScoreError { line: None, pattern: None, lane: None, at: None, fault: Fault::NoSong }); }
         self.errors.sort_by_key(|e| e.line);
         match self.head {
-            Some(head) if self.errors.is_empty() => Ok(Song { title: head.title, tempo: head.tempo, profile: head.profile, patterns: self.sheets.into_iter().map(|s| s.pattern).collect(), setlist }),
+            Some(head) if self.errors.is_empty() => Ok(Song { title: head.title, tempo: head.tempo, profile: head.profile, echo: head.echo, patterns: self.sheets.into_iter().map(|s| s.pattern).collect(), setlist }),
             _ => Err(self.errors),
         }
     }
@@ -744,7 +746,7 @@ mod tests {
         assert_eq!(faults("pattern bars 1 grid 4\n"), [Fault::NoSong, Fault::NoName("pattern")]);
         assert_eq!(faults("song tempo 90\nsong \"again\" tempo 90\n"), [Fault::NoTitle, Fault::SecondSong { first: 1 }]);
         assert_eq!(faults("song \"t\" tempo 90 bpm 90\npattern a bars 1 grid 4 bars 2\npattern a bars 1 grid 4\n"), [
-            Fault::UnknownParam { directive: "song", key: "bpm".into(), takes: &["tempo", "profile"] },
+            Fault::UnknownParam { directive: "song", key: "bpm".into(), takes: &["tempo", "profile", "echo", "feedback", "wet"] },
             Fault::RepeatedParam("bars".into()),
             Fault::SecondPattern { first: 2 },
         ]);

@@ -15,19 +15,21 @@ pub struct Args {
     pub summary: bool,
     #[arg(long, help = "also list every note as it plays, in song order with transposes applied: pitch, bar.slot, seconds and wav samples, volume and duty as heard, effects; written rests get a list of their own. json only (--human just counts them); pairs with --summary for a lean payload, which drops the sections table")]
     pub events: bool,
+    #[arg(long = "loop", help = "measure the song as a game loops it: what rings past the end (the snes echo) already sounds at the start")]
+    pub looped: bool,
 }
 
 pub fn run(args: Args, human: bool) -> Result<(), Box<dyn std::error::Error>> { listen::answer("check", human, if args.summary { Detail::Headline } else { Detail::Everything }, rehearse(args)) }
 
 fn rehearse(args: Args) -> Result<(Option<PathBuf>, Take), Vec<Remark>> {
     if let Some(wanted) = args.output { return Err(vec![Remark::loose("check-writes-nothing", format!("check writes no file, so -o {} has nowhere to go; `piro track` writes the wav", wanted.display()))]); }
-    let (output, mut take) = inspect(&listen::read(&args.input)?, args.strict)?;
+    let (output, mut take) = inspect(&listen::read(&args.input)?, args.strict, args.looped)?;
     if args.events { take.strikes = Some(events::strikes(&take)); }
     Ok((output, take))
 }
 
-fn inspect(text: &str, strict: bool) -> Result<(Option<PathBuf>, Take), Vec<Remark>> {
-    let take = listen::take(text)?;
+fn inspect(text: &str, strict: bool, looped: bool) -> Result<(Option<PathBuf>, Take), Vec<Remark>> {
+    let take = listen::take_looped(text, looped)?;
     if strict {
         let song = Song::parse(text).expect("take already parsed this text");
         let gaps: Vec<Remark> = song.patterns.iter().flat_map(|p| p.lanes.iter().flat_map(|l| unwritten(p, l))).collect();
@@ -61,11 +63,11 @@ mod tests {
 
     #[test]
     fn o_is_refused_not_ignored() {
-        let Err(errors) = rehearse(Args { input: "song.piro".into(), output: Some("song.wav".into()), strict: false, summary: false, events: false }) else { panic!("check -o should refuse") };
+        let Err(errors) = rehearse(Args { input: "song.piro".into(), output: Some("song.wav".into()), strict: false, summary: false, events: false, looped: false }) else { panic!("check -o should refuse") };
         assert_eq!(errors.iter().map(|e| e.code).collect::<Vec<_>>(), ["check-writes-nothing"]);
     }
 
-    fn strict(text: &str) -> Result<(Option<PathBuf>, Take), Vec<Remark>> { inspect(text, true) }
+    fn strict(text: &str) -> Result<(Option<PathBuf>, Take), Vec<Remark>> { inspect(text, true, false) }
 
     const HEAD: &str = "song \"s\" tempo 120\npattern p bars 1 grid 16\nlane pulse1\n";
 
@@ -107,7 +109,7 @@ mod tests {
 
     #[test]
     fn without_strict_the_gappy_score_still_passes() {
-        assert!(inspect(&format!("{HEAD}  1.1: C4 x2\n"), false).is_ok());
+        assert!(inspect(&format!("{HEAD}  1.1: C4 x2\n"), false, false).is_ok());
     }
 
     #[test]

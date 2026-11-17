@@ -1,6 +1,7 @@
 use crate::listen::{peak_dbfs, round};
 use piropipo::profile;
-use piropipo::render::SAMPLE_RATE;
+#[cfg(test)]
+use piropipo::render;
 use piropipo::score::{Pattern, Song};
 use serde_json::{Map, Value, json};
 use std::ops::Range;
@@ -13,14 +14,14 @@ const DIAL_DB: f64 = 20.0;
 pub struct Level { pub rms: Option<f64>, pub peak: Option<f64> }
 
 impl Level {
-    fn of(samples: &[i16]) -> Self { Level { rms: rms_dbfs(samples), peak: peak_dbfs(samples) } }
+    fn of(samples: &[i16], peaks: &[i16]) -> Self { Level { rms: rms_dbfs(samples), peak: peak_dbfs(peaks) } }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bar { pub bar: u32, pub at: f64, pub level: Level }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Section { pub pattern: String, pub play: usize, pub plays: usize, pub shift: i8, pub beats: u32, pub grid: u32, pub line: usize, pub samples: Range<usize>, pub level: Level, pub lanes: Vec<(String, usize)>, pub bars: Vec<Bar> }
+pub struct Section { pub pattern: String, pub play: usize, pub plays: usize, pub shift: i8, pub beats: u32, pub grid: u32, pub line: usize, pub samples: Range<usize>, pub rate: u32, pub level: Level, pub lanes: Vec<(String, usize)>, pub bars: Vec<Bar> }
 
 impl Section {
     fn json(&self) -> Value {
@@ -28,7 +29,7 @@ impl Section {
         let bars: Vec<Value> = self.bars.iter().map(|b| json!({ "bar": b.bar, "start_seconds": b.at, "rms_dbfs": b.level.rms, "peak_dbfs": b.level.peak })).collect();
         json!({
             "pattern": self.pattern, "play": self.play, "transpose": self.shift, "beats": self.beats, "grid": self.grid, "line": self.line,
-            "start_seconds": seconds(self.samples.start), "end_seconds": seconds(self.samples.end), "start_sample": self.samples.start, "end_sample": self.samples.end,
+            "start_seconds": seconds(self.samples.start, self.rate), "end_seconds": seconds(self.samples.end, self.rate), "start_sample": self.samples.start, "end_sample": self.samples.end,
             "rms_dbfs": self.level.rms, "peak_dbfs": self.level.peak, "lanes": lanes, "bars": bars,
         })
     }
@@ -41,7 +42,7 @@ impl Section {
     }
 
     fn tell(&self, loudest: f64) -> Vec<String> {
-        let head = format!("{} at {:.2}s: rms {}, peak {}", self.label(), seconds(self.samples.start), db(self.level.rms), db(self.level.peak));
+        let head = format!("{} at {:.2}s: rms {}, peak {}", self.label(), seconds(self.samples.start, self.rate), db(self.level.rms), db(self.level.peak));
         std::iter::once(head).chain(self.bars.iter().map(|b| format!("  bar {:<3} {:>6} rms {:>6} peak  {}", b.bar, db(b.level.rms), db(b.level.peak), needle(b.level.rms, loudest)))).collect()
     }
 }
@@ -85,14 +86,18 @@ impl Reading {
     }
 }
 
-pub fn read(song: &Song, samples: &[i16], plays: &[Range<usize>]) -> Reading {
+#[cfg(test)]
+pub fn read(song: &Song, samples: &[i16], plays: &[Range<usize>]) -> Reading { read_with(song, samples, samples, plays, render::sample_rate(song)) }
+
+// rms is measured on `samples` and peaks on `peaks`: on the snes, the stereo average and the louder channel
+pub fn read_with(song: &Song, samples: &[i16], peaks: &[i16], plays: &[Range<usize>], rate: u32) -> Reading {
     let cues: Vec<(&Pattern, i8, &Range<usize>)> = song.setlist.iter().zip(plays).filter_map(|(cue, span)| Some((song.pattern(&cue.pattern)?, cue.shift, span))).collect();
     let sections = cues.iter().enumerate().map(|(i, &(pattern, shift, span))| {
         let play = cues.iter().take(i + 1).filter(|c| c.0.name == pattern.name).count();
         let plays = cues.iter().filter(|c| c.0.name == pattern.name).count();
-        let bars = (0..pattern.bars).map(|b| { let (from, to) = (edge(span, pattern.bars, b), edge(span, pattern.bars, b + 1)); Bar { bar: b + 1, at: seconds(from), level: Level::of(samples.get(from..to).unwrap_or_default()) } }).collect();
+        let bars = (0..pattern.bars).map(|b| { let (from, to) = (edge(span, pattern.bars, b), edge(span, pattern.bars, b + 1)); Bar { bar: b + 1, at: seconds(from, rate), level: Level::of(samples.get(from..to).unwrap_or_default(), peaks.get(from..to).unwrap_or_default()) } }).collect();
         let lanes = pattern.lanes.iter().map(|l| (l.name.clone(), l.line)).collect();
-        Section { pattern: pattern.name.clone(), play, plays, shift, beats: pattern.beats, grid: pattern.grid, line: pattern.line, samples: span.clone(), level: Level::of(samples.get(span.clone()).unwrap_or_default()), lanes, bars }
+        Section { pattern: pattern.name.clone(), play, plays, shift, beats: pattern.beats, grid: pattern.grid, line: pattern.line, samples: span.clone(), rate, level: Level::of(samples.get(span.clone()).unwrap_or_default(), peaks.get(span.clone()).unwrap_or_default()), lanes, bars }
     }).collect();
     let mut turnouts: Vec<Turnout> = Vec::new();
     for &(pattern, _, _) in &cues { if !turnouts.iter().any(|t| t.pattern == pattern.name) { turnouts.push(turnout(song, pattern)); } }
@@ -123,7 +128,7 @@ fn turnout(song: &Song, pattern: &Pattern) -> Turnout {
 
 fn edge(span: &Range<usize>, bars: u32, bar: u32) -> usize { span.start + usize::try_from(span.len() as u64 * u64::from(bar) / u64::from(bars.max(1))).unwrap_or(span.len()) }
 
-fn seconds(sample: usize) -> f64 { round(sample as f64 / f64::from(SAMPLE_RATE), 6) }
+fn seconds(sample: usize, rate: u32) -> f64 { round(sample as f64 / f64::from(rate), 6) }
 
 fn rms_dbfs(samples: &[i16]) -> Option<f64> {
     let energy: u64 = samples.iter().map(|s| u64::from(s.unsigned_abs()).pow(2)).sum();
