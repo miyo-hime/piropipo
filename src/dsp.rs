@@ -152,7 +152,8 @@ impl Voice {
                 let mixed = (GAUSS[255 - f] * taps[0] >> 11) + (GAUSS[511 - f] * taps[1] >> 11) + (GAUSS[256 + f] * taps[2] >> 11) + (GAUSS[f] * taps[3] >> 11);
                 self.phase += u64::from(self.pitch);
                 let len = pcm.len() as u64;
-                match restart {
+                // a restart at or past the end plays unlooped, as `Source::at` reads it
+                match restart.filter(|&r| (r as u64) < len) {
                     Some(r) => { let span = (len - r as u64) << 12; while self.phase >> 12 >= len { self.phase -= span; } }
                     None if self.phase >> 12 >= len => { self.mode = Mode::Off; self.env = 0; }
                     None => {}
@@ -298,6 +299,17 @@ mod tests {
         held(&mut chip, 64_000);
         assert!(chip.level(0) > 0, "with the new sustain at full and no sustain release, the voice holds where it is");
         assert!(chip.voices[0].mode == Mode::Sustain);
+    }
+
+    #[test]
+    fn a_restart_past_the_end_plays_unlooped() {
+        static PCM: [i16; 4] = [1000; 4];
+        for restart in [Some(4), Some(9)] {
+            let mut chip = Chip::new(0, 0, 0);
+            chip.key_on(0, Key { source: Source::Sample { pcm: &PCM, restart }, ..key(0x1000) });
+            held(&mut chip, 64);
+            assert!(!chip.ringing(0), "{restart:?} ends the voice like no restart at all");
+        }
     }
 
     #[test]
