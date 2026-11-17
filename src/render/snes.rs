@@ -38,7 +38,7 @@ struct Strike { voice: usize, at: Position, start: u64, end: u64, off: Option<u6
 
 // the chip, and which voices the last play left held into this one by a legato lane, and on what
 #[derive(Debug, Clone)]
-pub struct Stage { chip: Chip, held: [Option<&'static Instrument>; VOICES], ringing: Option<Ringing> }
+pub struct Stage { chip: Chip, held: [Option<&'static Instrument>; VOICES], ringing: Vec<Ringing> }
 
 // a noise still sounding (its release, past a short note's key-off) when its play ends, on this clock, until this sample of the next
 #[derive(Debug, Clone, Copy)]
@@ -63,7 +63,7 @@ impl Strike {
 fn gate(start: u64, end: u64) -> u64 { if end - start > 2 * RELEASE { end - RELEASE } else { start + (end - start) / 2 } }
 
 // every strike a pattern makes, where it keys on and off, checked note by note the way the renderer plays it
-fn plan(song: &Song, pattern: &Pattern, held: [Option<&'static Instrument>; VOICES]) -> Result<Plan, RenderError> {
+fn plan(song: &Song, pattern: &Pattern, held: [Option<&'static Instrument>; VOICES], noise_only: bool) -> Result<Plan, RenderError> {
     let card = &SNES;
     if !(1..=255).contains(&song.tempo) { return Err(RenderError::Tempo(song.tempo)); }
     let tempo = song.tempo;
@@ -79,6 +79,7 @@ fn plan(song: &Song, pattern: &Pattern, held: [Option<&'static Instrument>; VOIC
         let name = lane.name.as_str();
         let seat = part.seat(&lane.params).map_err(|breach| charged(name, breach))?;
         let Some(inst) = seat.inst else { continue };
+        if noise_only && !matches!(inst.kind, Kind::Noise) { continue; }
         let (pan, echo, legato) = seat.setup.patch.map_or((0, false, false), |p| (i32::from(p.pan), p.echo, p.legato));
         let opened = strikes.len();
         let mut notes: Vec<_> = lane.notes.iter().collect();
@@ -141,34 +142,38 @@ fn plan(song: &Song, pattern: &Pattern, held: [Option<&'static Instrument>; VOIC
 // how long a strike really sounds: to its key-off (or its end, when a tie hands it on) and then through its release
 fn sounding(s: &Strike) -> (u64, u64) { (s.start, s.off.unwrap_or(s.end) + RELEASE) }
 
-// the chip has one noise clock: two noises sounding at once, releases included, have to agree on it. `carried` is a noise still
-// ringing in from the last play; the answer is the one this play leaves ringing into the next
-fn clocks(plan: &Plan, carried: Option<Ringing>) -> Result<Option<Ringing>, RenderError> {
-    let noises: Vec<&Strike> = plan.strikes.iter().filter(|s| s.clock.is_some()).collect();
-    let refuse = |later: &Strike, voice: usize, held: Position, holds: u8| RenderError::Card {
-        lane: Some(SNES.parts[later.voice].name.to_owned()),
-        breach: profile::Breach::Clock { at: later.at, clock: later.clock.unwrap_or(holds), lane: SNES.parts[voice].name.to_owned(), held, holds },
-    };
-    for (i, later) in noises.iter().enumerate() {
-        let (from, _) = sounding(later);
-        if let Some(r) = carried.filter(|r| from < r.until && Some(r.clock) != later.clock && r.voice != later.voice) { return Err(refuse(later, r.voice, r.at, r.clock)); }
-        if let Some(earlier) = noises[..i].iter().find(|e| e.voice != later.voice && sounding(e).1 > from && e.clock != later.clock) {
-            return Err(refuse(later, earlier.voice, earlier.at, earlier.clock.unwrap_or(0)));
+// the chip has one noise clock: two noises sounding at once, releases included, have to agree on it. a voice's release ends
+// early if the voice is struck again, and `carried` holds the noises still ringing in from the last play; the answer is the
+// noises this play leaves ringing into the next
+fn clocks(plan: &Plan, carried: &[Ringing]) -> Result<Vec<Ringing>, RenderError> {
+    let next_on = |voice: usize, after: Option<u64>| plan.strikes.iter().filter(|s| s.voice == voice && after.is_none_or(|a| s.start > a)).map(|s| s.start).min();
+    // (voice, where it was written, clock, first sample, first sample it's silent)
+    let mut spans: Vec<(usize, Position, u8, u64, u64)> = carried.iter().map(|r| (r.voice, r.at, r.clock, 0, next_on(r.voice, None).map_or(r.until, |n| n.min(r.until)))).collect();
+    let inherited = spans.len();
+    for s in plan.strikes.iter() {
+        let Some(clock) = s.clock else { continue };
+        let (from, until) = sounding(s);
+        spans.push((s.voice, s.at, clock, from, next_on(s.voice, Some(s.start)).map_or(until, |n| n.min(until))));
+    }
+    for i in inherited..spans.len() {
+        let (voice, at, clock, from, until) = spans[i];
+        if let Some(&(other, held, holds, ..)) = spans[..i].iter().find(|o| o.0 != voice && o.2 != clock && o.3 < until && from < o.4) {
+            return Err(RenderError::Card { lane: Some(SNES.parts[voice].name.to_owned()), breach: profile::Breach::Clock { at, clock, lane: SNES.parts[other].name.to_owned(), held, holds } });
         }
     }
-    let last = noises.iter().max_by_key(|s| sounding(s).1).filter(|s| sounding(s).1 > plan.len);
-    Ok(last.map(|s| Ringing { clock: s.clock.unwrap_or(0), until: sounding(s).1 - plan.len, voice: s.voice, at: s.at }))
+    Ok(spans[inherited..].iter().filter(|s| s.4 > plan.len).map(|&(voice, at, clock, _, until)| Ringing { clock, until: until - plan.len, voice, at }).collect())
 }
 
-// a pattern that never plays still answers to the card's one noise clock
-pub fn vet(song: &Song, pattern: &Pattern) -> Result<(), RenderError> { plan(song, pattern, [None; VOICES]).and_then(|p| clocks(&p, None)).map(|_| ()) }
+// a pattern that never plays still answers to the card's one noise clock; only its noise lanes are planned, so the check costs
+// what the noise notes cost, however long the pattern's other notes are
+pub fn vet(song: &Song, pattern: &Pattern) -> Result<(), RenderError> { plan(song, pattern, [None; VOICES], true).and_then(|p| clocks(&p, &[])).map(|_| ()) }
 
 pub fn press(song: &Song, pattern: &Pattern, stage: &mut Option<Stage>) -> Result<Vec<[i16; 2]>, RenderError> {
     let room = SNES.room(song).map_err(|breach| charged("", breach))?;
-    let plan = plan(song, pattern, stage.as_ref().map_or([None; VOICES], |s| s.held))?;
-    let outgoing = clocks(&plan, stage.as_ref().and_then(|s| s.ringing))?;
+    let plan = plan(song, pattern, stage.as_ref().map_or([None; VOICES], |s| s.held), false)?;
+    let outgoing = clocks(&plan, stage.as_ref().map_or(&[][..], |s| &s.ringing))?;
     let Plan { strikes, holds, len } = plan;
-    let stage = stage.get_or_insert_with(|| Stage { chip: room.map_or_else(|| Chip::new(0, 0, 0), |r| Chip::new(r.delay, r.feedback, r.wet)), held: [None; VOICES], ringing: None });
+    let stage = stage.get_or_insert_with(|| Stage { chip: room.map_or_else(|| Chip::new(0, 0, 0), |r| Chip::new(r.delay, r.feedback, r.wet)), held: [None; VOICES], ringing: Vec::new() });
     stage.ringing = outgoing;
     // a voice held from the last play that nothing here takes up is let go on this play's first sample
     for (voice, inst) in stage.held.iter().enumerate() {
@@ -209,6 +214,10 @@ pub fn press(song: &Song, pattern: &Pattern, stage: &mut Option<Stage>) -> Resul
             }
         }
         out.push(chip.sample());
+    }
+    // a fade held into the next play has run its course by the end of this one: write its silence before anything lets it go
+    for (voice, slot) in live.iter().enumerate() {
+        if slot.is_some_and(|i| strikes[i].fade) { chip.volume(voice, [0, 0]); }
     }
     Ok(out)
 }
@@ -376,6 +385,23 @@ mod tests {
         assert!(matches!(across, RenderError::Card { breach: profile::Breach::Clock { .. }, .. }), "a release that rings into the next play still holds the clock: {across}");
         let agreed = song("song \"s\" tempo 255 profile snes\npattern p bars 1 grid 255\nlane voice1 inst noise\n  1: C7 x1\nlane voice2 inst noise\n  2: C7 x1\n");
         assert!(crate::render::press(&agreed, &agreed.patterns[0], &mut Stencils::default()).is_ok());
+    }
+
+    #[test]
+    fn every_release_carried_into_the_next_play_holds_the_clock() {
+        let both = refused("song \"s\" tempo 255 profile snes\npattern p bars 1 grid 255\nlane voice1 inst noise\n  255: C7 x1\nlane voice2 inst noise\n  255: C7 x1\npattern q bars 1 grid 255\nlane voice2 inst noise\n  1: C2 x1\nplay\n  p\n  q\n");
+        assert!(matches!(&both, RenderError::Card { breach: profile::Breach::Clock { lane, .. }, .. } if lane == "voice1"), "voice2 struck again cuts its own release, but voice1's still rings: {both}");
+        let replaced = song("song \"s\" tempo 255 profile snes\npattern p bars 1 grid 255\nlane voice1 inst noise\n  1: C7 x1\n  2: C2 x1\nlane voice2 inst noise\n  2: C2 x1\n");
+        assert!(crate::render::press(&replaced, &replaced.patterns[0], &mut Stencils::default()).is_ok(), "a release cut short by its own voice's next note holds nothing");
+    }
+
+    #[test]
+    fn a_fade_held_into_the_next_play_is_silent_there() {
+        let song = song("song \"s\" tempo 255 profile snes\npattern p bars 1 grid 255\nlane voice1 inst organ vol 15 legato on adsr 15,7,7,0\n  247: C4 x9 fade\npattern q bars 1 grid 4\nplay\n  p\n  q\n");
+        let mut stencils = Stencils::default();
+        crate::render::press(&song, &song.patterns[0], &mut stencils).unwrap();
+        let q = crate::render::press(&song, &song.patterns[1], &mut stencils).unwrap().stereo.unwrap();
+        assert!(q.iter().all(|s| *s == [0, 0]), "the fade reached nothing at the end of p, so q hears no release");
     }
 
     #[test]

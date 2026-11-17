@@ -315,7 +315,7 @@ and checks it byte for byte.
 
 the report grows a `chip` block: the sound ram spend, the echo, and the **tail** - how
 long the chip keeps ringing after the last sample of the file. a song that ends while the
-echo still rings loud enough to hear (a tail starting above -40 dbfs) gets a `tail-cut`
+echo still rings loud enough to hear (a tail that peaks above -40 dbfs) gets a `tail-cut`
 warning. if the game loops it, render with
 `piro track --loop` (and `piro check --loop`): the song plays through the chip twice and
 the second pass is kept, so the end's echo is already sounding at the start and the loop

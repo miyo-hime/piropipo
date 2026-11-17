@@ -79,7 +79,7 @@ fn step(env: u16) -> u16 { env - (((env - 1) >> 8) + 1) }
 // ticks of the decay from full until the envelope enters the sustain level's band, and the level it enters at
 fn decay(sustain: u8) -> (u32, u16) {
     let (mut env, mut ticks) = (0x7FF, 0);
-    while env >> 8 != u16::from(sustain.min(7)) { env = step(env); ticks += 1; }
+    while env >> 8 > u16::from(sustain.min(7)) { env = step(env); ticks += 1; }
     (ticks, env)
 }
 
@@ -124,7 +124,8 @@ impl Voice {
             if self.env == 0 { self.mode = Mode::Off; }
             return;
         }
-        if self.mode == Mode::Decay && self.env >> 8 == u16::from(sustain) { self.mode = Mode::Sustain; }
+        // at or under the band, not only in it: a tie can raise the sustain level while the decay is already below it
+        if self.mode == Mode::Decay && self.env >> 8 <= u16::from(sustain) { self.mode = Mode::Sustain; }
         let rate = match self.mode { Mode::Attack => usize::from(attack) * 2 + 1, Mode::Decay => usize::from(decay) * 2 + 16, Mode::Sustain => usize::from(release), _ => return };
         let period = PERIODS[rate];
         if period == 0 { return; }
@@ -241,6 +242,22 @@ impl Chip {
     }
 }
 
+// when a held envelope reaches silence, in samples from its key-on, walking each stretch with its own adsr the way a voice
+// does when a legato tie changes its envelope; None if it never does within the stretches
+pub fn silent_after(stretches: &[(Adsr, u64)]) -> Option<u64> {
+    let mut voice = Voice { mode: Mode::Attack, adsr: stretches.first()?.0, ..Voice::default() };
+    let (mut t, mut risen) = (0, false);
+    for &(adsr, samples) in stretches {
+        voice.adsr = adsr;
+        for _ in 0..samples {
+            voice.envelope();
+            t += 1;
+            if voice.env > 0 { risen = true; } else if risen { return Some(t); }
+        }
+    }
+    None
+}
+
 // the noise clock nearest a frequency, among the 31 that tick
 pub fn nearest_clock(hz: f64) -> u8 {
     (1..32u8).min_by(|a, b| {
@@ -281,6 +298,19 @@ mod tests {
     }
 
     fn held(chip: &mut Chip, n: usize) -> Vec<[i16; 2]> { (0..n).map(|_| chip.sample()).collect() }
+
+    #[test]
+    fn a_sustain_raised_mid_decay_holds_instead_of_draining() {
+        let mut chip = Chip::new(0, 0, 0);
+        chip.key_on(0, Key { adsr: Adsr { attack: 15, decay: 0, sustain: 0, release: 0 }, ..key(0x1000) });
+        held(&mut chip, 40_000);
+        assert!(chip.level(0) >> 8 < 7, "the decay has passed band 7");
+        chip.route(0, false, Adsr { attack: 15, decay: 0, sustain: 7, release: 0 });
+        held(&mut chip, 64_000);
+        assert!(chip.level(0) > 0, "with the new sustain at full and no sustain release, the voice holds where it is");
+        assert_eq!(silent_after(&[(Adsr { attack: 15, decay: 7, sustain: 0, release: 31 }, 1_000_000)]), Some(1_137));
+        assert_eq!(silent_after(&[(Adsr { attack: 15, decay: 7, sustain: 7, release: 0 }, 100_000)]), None);
+    }
 
     #[test]
     fn the_envelope_times_are_the_voice_s_own() {
