@@ -287,11 +287,13 @@ mod tests {
     fn a_sustain_raised_mid_decay_holds_instead_of_draining() {
         let mut chip = Chip::new(0, 0, 0);
         chip.key_on(0, Key { adsr: Adsr { attack: 15, decay: 0, sustain: 0, release: 0 }, ..key(0x1000) });
-        held(&mut chip, 40_000);
-        assert!(chip.level(0) >> 8 < 7, "the decay has passed band 7");
+        // still decaying toward sustain 0, and already under band 7
+        held(&mut chip, 5_000);
+        assert!(chip.voices[0].mode == Mode::Decay && (1..7).contains(&(chip.level(0) >> 8)), "{:?} at {:#x}", chip.voices[0].mode, chip.level(0));
         chip.route(0, false, Adsr { attack: 15, decay: 0, sustain: 7, release: 0 });
         held(&mut chip, 64_000);
         assert!(chip.level(0) > 0, "with the new sustain at full and no sustain release, the voice holds where it is");
+        assert!(chip.voices[0].mode == Mode::Sustain);
     }
 
     #[test]
